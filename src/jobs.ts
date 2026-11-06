@@ -19,20 +19,24 @@ const hourBucket = "CAST(DATE_FORMAT(ts, '%Y-%m-%d %H:00:00') AS DATETIME)";
  */
 export async function rollup(now = new Date()): Promise<void> {
   const cutoff = new Date(Math.floor((now.getTime() - RAW_RETENTION_MS) / HOUR_MS) * HOUR_MS);
-  await tx(async (c) => {
-    await run(
-      `INSERT INTO metrics_hourly (server_id, hour, avg_watts, kwh)
-       SELECT * FROM (
-         SELECT server_id, ${hourBucket} AS h, AVG(watts) AS w, SUM(watts) * ? / 3600000 AS k
-         FROM metrics WHERE ts < ? GROUP BY server_id, h
-       ) AS n
-       ON DUPLICATE KEY UPDATE kwh = metrics_hourly.kwh + n.k, avg_watts = (metrics_hourly.avg_watts + n.w) / 2`,
-      [METRIC_INTERVAL_SEC, cutoff],
-      c,
-    );
-    await run('DELETE FROM metrics WHERE ts < ?', [cutoff], c);
-    await run('DELETE FROM process_samples WHERE ts < ?', [cutoff], c);
-  });
+  // One short transaction per server. `ts < ?` alone cannot use the (server_id, ts) key, so a single
+  // pass would scan and lock whole tables and stall every agent's inserts behind it.
+  for (const { id } of await rows<{ id: number }>('SELECT id FROM servers')) {
+    await tx(async (c) => {
+      await run(
+        `INSERT INTO metrics_hourly (server_id, hour, avg_watts, kwh)
+         SELECT * FROM (
+           SELECT server_id, ${hourBucket} AS h, AVG(watts) AS w, SUM(watts) * ? / 3600000 AS k
+           FROM metrics WHERE server_id = ? AND ts < ? GROUP BY server_id, h
+         ) AS n
+         ON DUPLICATE KEY UPDATE kwh = metrics_hourly.kwh + n.k, avg_watts = (metrics_hourly.avg_watts + n.w) / 2`,
+        [METRIC_INTERVAL_SEC, id, cutoff],
+        c,
+      );
+      await run('DELETE FROM metrics WHERE server_id = ? AND ts < ?', [id, cutoff], c);
+      await run('DELETE FROM process_samples WHERE server_id = ? AND ts < ?', [id, cutoff], c);
+    });
+  }
 }
 
 async function findingsFor(server: ServerRow, now: Date): Promise<Finding[]> {

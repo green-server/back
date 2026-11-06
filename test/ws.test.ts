@@ -53,6 +53,7 @@ test('agent happy path: metrics, consultation, approval, result, report, undo', 
   const event = await web.next((m) => m.type === 'metric');
   assert.equal(event.serverId, serverId);
   assert.deepEqual(event.metric, { ts: sample.ts, cpuPct: 12.5, memPct: 40, watts: 80, isEstimated: false });
+  assert.deepEqual(event.processes.map((p: { name: string }) => p.name), ['big', 'small'], 'heaviest first, as GET /processes');
 
   const summary = (await client.req('GET', `/api/servers/${serverId}`)).body;
   assert.equal(summary.latestWatts, 80);

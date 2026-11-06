@@ -31,6 +31,8 @@ function isProcess(p: unknown): p is { pid: number; name: string; cpuPct: number
   );
 }
 
+const TOP_PROCESSES = 10;
+
 async function onMetrics(ctx: AgentContext, m: Message): Promise<void> {
   const ts = new Date(typeof m.ts === 'string' ? m.ts : NaN);
   const age = Date.now() - ts.getTime();
@@ -61,6 +63,11 @@ async function onMetrics(ctx: AgentContext, m: Message): Promise<void> {
     type: 'metric',
     serverId: ctx.serverId,
     metric: { ts: ts.toISOString(), cpuPct, memPct, watts, isEstimated },
+    // Same shape as GET /processes, so an open page needs no request per sample.
+    processes: [...(processes as { pid: number; name: string; cpuPct: number; watts: number }[])]
+      .sort((a, b) => b.watts - a.watts)
+      .slice(0, TOP_PROCESSES)
+      .map((p) => ({ ts: ts.toISOString(), pid: p.pid, name: p.name.slice(0, 255), cpuPct: p.cpuPct, watts: p.watts })),
   });
 }
 
