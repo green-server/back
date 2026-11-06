@@ -347,6 +347,53 @@ api.post('/tool-calls/:id/undo', async (req, res) => {
   res.status(202).json(await undo(req.user.id, pathId(req)));
 });
 
+const ACTIVITY_LIMIT = 20;
+
+api.get('/reports/activity', async (req, res) => {
+  // LEFT JOIN: a server nothing was recommended for still belongs in the table, with zeros.
+  const servers = await rows<{ id: number; name: string; total: number; open: string | null; applied: string | null; open_saving: string | null }>(
+    `SELECT s.id, s.name, COUNT(r.id) AS total,
+            SUM(r.status = 'open') AS open, SUM(r.status = 'applied') AS applied,
+            SUM(CASE WHEN r.status = 'open' THEN r.est_saving_krw END) AS open_saving
+     FROM servers s
+     LEFT JOIN recommendations r ON r.server_id = s.id
+     WHERE s.user_id = ?
+     GROUP BY s.id, s.name
+     ORDER BY s.id`,
+    [req.user.id],
+  );
+  // INNER JOIN: a command only exists inside a consultation on a server, so the chain always matches.
+  const calls = await rows<{ id: number; command: string; decision: ToolCallRow['decision']; exit_code: number | null; consultation_id: number; requested_at: Date; server_name: string }>(
+    `SELECT t.id, t.command, t.decision, t.exit_code, c.id AS consultation_id, c.requested_at, s.name AS server_name
+     FROM tool_calls t
+     INNER JOIN consultations c ON c.id = t.consultation_id
+     INNER JOIN servers s ON s.id = c.server_id
+     WHERE s.user_id = ?
+     ORDER BY t.id DESC
+     LIMIT ?`,
+    [req.user.id, ACTIVITY_LIMIT],
+  );
+  res.json({
+    servers: servers.map((s) => ({
+      serverId: s.id,
+      serverName: s.name,
+      total: Number(s.total),
+      open: Number(s.open ?? 0),
+      applied: Number(s.applied ?? 0),
+      openSavingKrw: Number(s.open_saving ?? 0),
+    })),
+    calls: calls.map((c) => ({
+      id: c.id,
+      command: c.command,
+      decision: c.decision,
+      exitCode: c.exit_code,
+      consultationId: c.consultation_id,
+      requestedAt: c.requested_at.toISOString(),
+      serverName: c.server_name,
+    })),
+  });
+});
+
 api.get('/reports/savings', async (req, res) => {
   let serverId: number | null = null;
   if (req.query.serverId !== undefined) {

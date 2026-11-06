@@ -598,3 +598,30 @@ test('savings report is scoped to the caller and validates serverId', async () =
   assert.equal(body.bySource.length, 2);
   assert.equal((await stranger.client.req('GET', '/api/reports/savings?serverId=abc')).status, 400);
 });
+
+test('activity report keeps servers without recommendations and joins commands to their server', async () => {
+  const { client } = await signup(app.base);
+  const busy = (await addServer(client, { ...SERVER, name: 'busy' })).server;
+  const quiet = (await addServer(client, { ...SERVER, name: 'quiet' })).server;
+  await pool.query(
+    "INSERT INTO recommendations (server_id, source, type, detail, est_saving_krw, status) VALUES (?, 'rule', 'idle', 'a', 100, 'open'), (?, 'rule', 'idle', 'b', 50, 'applied')",
+    [busy.id, busy.id],
+  );
+  const consultationId = await insertConsultation(busy.id);
+  await insertToolCall(consultationId, { command: 'uptime', tier: 'auto', decision: 'auto', exit_code: 0 });
+
+  const stranger = await signup(app.base, 'stranger@example.com');
+  const foreign = (await addServer(stranger.client, { ...SERVER, name: 'foreign' })).server;
+  await insertToolCall(await insertConsultation(foreign.id), { command: 'secret' });
+
+  const { status, body } = await client.req('GET', '/api/reports/activity');
+  assert.equal(status, 200);
+  assert.deepEqual(body.servers, [
+    { serverId: busy.id, serverName: 'busy', total: 2, open: 1, applied: 1, openSavingKrw: 100 },
+    { serverId: quiet.id, serverName: 'quiet', total: 0, open: 0, applied: 0, openSavingKrw: 0 },
+  ]);
+  assert.equal(body.calls.length, 1);
+  assert.equal(body.calls[0].command, 'uptime');
+  assert.equal(body.calls[0].serverName, 'busy');
+  assert.equal(body.calls[0].consultationId, consultationId);
+});
