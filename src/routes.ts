@@ -4,6 +4,7 @@ import { clearSession, hashPassword, requireAuth, setSession, sha256, verifyPass
 import { one, rows, run } from './db.js';
 import { agentOffline, ApiError, invalid, isNumber, isObject, isText, notFound, parseId } from './http.js';
 import { broadcast, closeAgent, closeWebClients, isOnline, sendToAgent } from './hub.js';
+import { streamOf } from './stream.js';
 import {
   getConsultation,
   iso,
@@ -309,7 +310,7 @@ api.get('/consultations/:id', async (req, res) => {
   );
   if (!consultation) throw notFound();
   const calls = await rows<ToolCallRow>('SELECT * FROM tool_calls WHERE consultation_id = ? ORDER BY id', [consultation.id]);
-  res.json({ ...toConsultation(consultation), toolCalls: calls.map(toToolCall) });
+  res.json({ ...toConsultation(consultation), toolCalls: calls.map(toToolCall), stream: streamOf(consultation.id) });
 });
 
 api.post('/tool-calls/:id/decision', async (req, res) => {

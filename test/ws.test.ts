@@ -417,3 +417,33 @@ test('only an allowed privileged command is sent back signed', async () => {
   await agent.close();
   await web.close();
 });
+
+test('consultation stream reaches the owner and stops when the consultation ends', async () => {
+  const { client } = await signup(app.base);
+  const { server, agentToken } = await addServer(client);
+  const agent = await connectAgent(app.wsBase, agentToken);
+  const web = await connectWeb(app.wsBase, client.cookie);
+  const created = await client.req('POST', `/api/servers/${server.id}/consultations`, { authMode: 'api_key' });
+  await agent.next((m) => m.type === 'consultation_start');
+  const consultationId = created.body.id;
+
+  agent.send({ type: 'consultation_stream', consultationId, kind: 'unknown', text: 'x' });
+  agent.send({ type: 'consultation_stream', consultationId: consultationId + 99, kind: 'text', text: 'foreign' });
+  const event = web.next((m) => m.type === 'consultation_stream');
+  agent.send({ type: 'consultation_stream', consultationId, kind: 'command', text: 'uptime' });
+  const { entry } = await event;
+  assert.equal(entry.kind, 'command');
+  assert.equal(entry.text, 'uptime');
+
+  const detail = await client.req('GET', `/api/consultations/${consultationId}`);
+  assert.deepEqual(detail.body.stream, [entry]);
+
+  const done = web.next((m) => m.type === 'consultation');
+  agent.send({ type: 'consultation_status', consultationId, status: 'done', summary: '끝', recommendations: [] });
+  await done;
+  agent.send({ type: 'consultation_stream', consultationId, kind: 'text', text: 'late' });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal((await client.req('GET', `/api/consultations/${consultationId}`)).body.stream.length, 1);
+  await agent.close();
+  await web.close();
+});

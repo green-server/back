@@ -3,6 +3,7 @@ import { one, rows, run, tx } from './db.js';
 import { broadcast } from './hub.js';
 import { isNumber, isObject, isText } from './http.js';
 import { getConsultation, getToolCall, type ToolCallRow } from './models.js';
+import { pushStream, type StreamEntry } from './stream.js';
 import { forget, ingestDecision, isTracked, settle, track } from './toolCalls.js';
 
 export type AgentContext = { serverId: number; userId: number };
@@ -13,6 +14,8 @@ const MAX_RECOMMENDATIONS = 20;
 const MAX_FUTURE_SKEW_MS = 5 * 60_000;
 export const RAW_RETENTION_MS = 7 * 24 * 3_600_000;
 const MAX_TEXT = 60_000; // TEXT columns hold 64 KB
+const MAX_STREAM_TEXT = 8_000;
+const STREAM_KINDS = ['text', 'command', 'output'];
 
 const isInt32 = (v: unknown): v is number => Number.isInteger(v) && isNumber(v, -2147483648, 2147483647);
 const isId = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) > 0;
@@ -207,6 +210,18 @@ async function onConsultationStatus(ctx: AgentContext, m: Message): Promise<void
   broadcast(ctx.userId, { type: 'consultation', consultation: await getConsultation(consultationId) });
 }
 
+async function onConsultationStream(ctx: AgentContext, m: Message): Promise<void> {
+  const { consultationId, kind, text } = m;
+  if (!isId(consultationId) || !STREAM_KINDS.includes(kind as string) || !isText(text, MAX_STREAM_TEXT)) return;
+  const live = await one(
+    "SELECT id FROM consultations WHERE id = ? AND server_id = ? AND status IN ('requested', 'running')",
+    [consultationId, ctx.serverId],
+  );
+  if (!live) return;
+  const entry = pushStream(consultationId, kind as StreamEntry['kind'], text);
+  broadcast(ctx.userId, { type: 'consultation_stream', consultationId, entry });
+}
+
 export async function handleAgentMessage(ctx: AgentContext, raw: string): Promise<void> {
   let m: unknown;
   try {
@@ -229,6 +244,8 @@ export async function handleAgentMessage(ctx: AgentContext, raw: string): Promis
       return onToolResult(ctx, m);
     case 'consultation_status':
       return onConsultationStatus(ctx, m);
+    case 'consultation_stream':
+      return onConsultationStream(ctx, m);
     case 'undo_result':
       return onUndoResult(ctx, m);
   }
