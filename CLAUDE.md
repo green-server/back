@@ -1,6 +1,6 @@
 # back
 
-WattLens의 백엔드. 웹에는 REST/WebSocket을 제공하고, 서버용 앱의 WebSocket 연결을 받는다.
+Green Server의 백엔드. 웹에는 REST/WebSocket을 제공하고, 서버용 앱의 WebSocket 연결을 받는다.
 
 - 스택: Node.js + Express (TypeScript), MySQL 8
 - DB는 ORM 없이 `mysql2`로 SQL을 직접 작성한다.

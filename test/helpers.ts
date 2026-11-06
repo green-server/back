@@ -1,0 +1,165 @@
+import './env.js';
+import assert from 'node:assert/strict';
+import type { AddressInfo } from 'node:net';
+import { WebSocket } from 'ws';
+import { createServer } from '../src/app.js';
+import { one, pool } from '../src/db.js';
+
+export const ORIGIN = 'http://front.test';
+const sockets = new Set<WebSocket>();
+export const SERVER = { name: 'home', kind: 'home_pc', ratePlan: 'home_tiered', householdKwh: 300 };
+
+export async function resetDb(): Promise<void> {
+  const row = await one<{ db: string }>('SELECT DATABASE() AS db');
+  assert.equal(row?.db, 'green_server_test', 'tests may only run against green_server_test');
+  await pool.query('DELETE FROM users');
+}
+
+export async function startApp() {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    base: `http://127.0.0.1:${port}`,
+    wsBase: `ws://127.0.0.1:${port}`,
+    // A failed test leaves its sockets open, and close() would otherwise wait on them forever.
+    close: () =>
+      new Promise((resolve) => {
+        for (const ws of sockets) ws.terminate();
+        server.close(resolve);
+      }),
+  };
+}
+
+export type Res = { status: number; body: any; headers: Headers };
+
+export class Client {
+  cookie = '';
+  constructor(readonly base: string) {}
+
+  async req(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<Res> {
+    const res = await fetch(this.base + path, {
+      method,
+      headers: {
+        ...(this.cookie ? { cookie: this.cookie } : {}),
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...headers,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const setCookie = res.headers.get('set-cookie');
+    if (setCookie) this.cookie = setCookie.split(';')[0]!;
+    const text = await res.text();
+    return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers };
+  }
+}
+
+let nextEmail = 0;
+
+export async function signup(base: string, email = `user${++nextEmail}@test.dev`) {
+  const client = new Client(base);
+  const res = await client.req('POST', '/api/auth/signup', { email, name: '사용자', password: 'password-123' });
+  assert.equal(res.status, 201);
+  return { client, user: res.body, email };
+}
+
+export async function addServer(client: Client, input: object = SERVER) {
+  const res = await client.req('POST', '/api/servers', input);
+  assert.equal(res.status, 201);
+  return res.body as { server: any; agentToken: string };
+}
+
+/** A WebSocket client that keeps what it receives, so a test can wait for one message by shape. */
+export class Peer {
+  private inbox: any[] = [];
+  private waiters: (() => void)[] = [];
+
+  constructor(readonly ws: WebSocket) {
+    ws.on('message', (data) => {
+      this.inbox.push(JSON.parse(data.toString()));
+      for (const wake of this.waiters.splice(0)) wake();
+    });
+  }
+
+  async next(match: (m: any) => boolean, timeoutMs = 3000): Promise<any> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const i = this.inbox.findIndex(match);
+      if (i >= 0) return this.inbox.splice(i, 1)[0];
+      const left = deadline - Date.now();
+      if (left <= 0) assert.fail(`no matching message; inbox: ${JSON.stringify(this.inbox)}`);
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, left);
+        this.waiters.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+  }
+
+  send(message: object): void {
+    this.ws.send(JSON.stringify(message));
+  }
+
+  async close(): Promise<void> {
+    if (this.ws.readyState === WebSocket.CLOSED) return;
+    await new Promise((resolve) => {
+      this.ws.once('close', resolve);
+      this.ws.close();
+    });
+  }
+}
+
+export function connect(url: string, headers: Record<string, string>): Promise<Peer> {
+  const ws = new WebSocket(url, { headers });
+  sockets.add(ws);
+  const peer = new Peer(ws);
+  return new Promise((resolve, reject) => {
+    ws.once('open', () => resolve(peer));
+    ws.once('unexpected-response', (_req, res) => reject(new Error(String(res.statusCode))));
+    ws.once('error', reject);
+  });
+}
+
+export const connectAgent = (wsBase: string, token: string) =>
+  connect(`${wsBase}/ws/agent`, { authorization: `Bearer ${token}` });
+
+export const connectWeb = (wsBase: string, cookie: string) =>
+  connect(`${wsBase}/ws/web`, { origin: ORIGIN, cookie });
+
+export const metric = (overrides: object = {}) => ({
+  type: 'metrics',
+  ts: new Date().toISOString(),
+  cpuPct: 12.5,
+  memPct: 40,
+  watts: 80,
+  isEstimated: false,
+  processes: [
+    { pid: 1, name: 'small', cpuPct: 1, watts: 2 },
+    { pid: 2, name: 'big', cpuPct: 50, watts: 30 },
+  ],
+  ...overrides,
+});
+
+export const toolCall = (consultationId: number, requestId: string, overrides: object = {}) => ({
+  type: 'tool_call',
+  consultationId,
+  requestId,
+  command: 'systemctl stop minecraft',
+  tier: 'approve',
+  decision: 'pending',
+  undoCommand: 'systemctl start minecraft',
+  ...overrides,
+});
+
+export async function insertToolCall(consultationId: number, fields: Record<string, unknown>): Promise<number> {
+  const row = { consultation_id: consultationId, command: 'cmd', tier: 'approve', decision: 'pending', ...fields };
+  const [result] = await pool.query('INSERT INTO tool_calls SET ?', [row]);
+  return (result as { insertId: number }).insertId;
+}
+
+export async function insertConsultation(serverId: number): Promise<number> {
+  const [result] = await pool.query("INSERT INTO consultations (server_id, auth_mode) VALUES (?, 'api_key')", [serverId]);
+  return (result as { insertId: number }).insertId;
+}
