@@ -225,20 +225,35 @@ api.get('/servers/:id/recommendations', async (req, res) => {
   res.json(found.map(toRecommendation));
 });
 
-async function closeRecommendation(req: Request, res: Response, assignment: string) {
-  const select = `SELECT r.* FROM recommendations r JOIN servers s ON s.id = r.server_id WHERE r.id = ? AND s.user_id = ?`;
-  const params = [pathId(req), req.user.id];
-  const found = await one<RecommendationRow>(select, params);
+const RECOMMENDATION_SELECT = `SELECT r.* FROM recommendations r JOIN servers s ON s.id = r.server_id WHERE r.id = ? AND s.user_id = ?`;
+
+async function ownedRecommendation(req: Request) {
+  const found = await one<RecommendationRow>(RECOMMENDATION_SELECT, [pathId(req), req.user.id]);
   if (!found) throw notFound();
+  return found;
+}
+
+async function closeRecommendation(req: Request, res: Response, assignment: string) {
+  const found = await ownedRecommendation(req);
   if (found.status !== 'open') throw new ApiError(409, 'not_open', '열려 있는 추천이 아닙니다.');
   await run(`UPDATE recommendations SET ${assignment} WHERE id = ? AND status = 'open'`, [found.id]);
-  res.json(toRecommendation((await one<RecommendationRow>(select, params))!));
+  res.json(toRecommendation(await ownedRecommendation(req)));
 }
 
 api.post('/recommendations/:id/dismiss', (req, res) => closeRecommendation(req, res, "status = 'dismissed'"));
 
 // applied_at is what the savings report compares before and after.
 api.post('/recommendations/:id/apply', (req, res) => closeRecommendation(req, res, "status = 'applied', applied_at = NOW()"));
+
+api.post('/recommendations/:id/unapply', async (req, res) => {
+  const found = await ownedRecommendation(req);
+  if (found.status !== 'applied') throw new ApiError(409, 'not_applied', '적용된 추천이 아닙니다.');
+  // Commands really ran for these: clearing the mark would hide a change that is still on the server.
+  const calls = await rows<{ id: number }>('SELECT id FROM tool_calls WHERE recommendation_id = ? LIMIT 1', [found.id]);
+  if (calls.length > 0) throw new ApiError(409, 'has_tool_calls', '실행 기록이 있는 조치입니다. 컨설팅 화면에서 되돌려 주세요.');
+  await run("UPDATE recommendations SET status = 'open', applied_at = NULL WHERE id = ? AND status = 'applied'", [found.id]);
+  res.json(toRecommendation(await ownedRecommendation(req)));
+});
 
 api.get('/servers/:id/consultations', async (req, res) => {
   const { id } = await ownedServer(req);

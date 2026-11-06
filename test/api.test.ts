@@ -211,6 +211,7 @@ test("other users' resources are 404 on every :id route", async () => {
     ['GET', `/api/servers/${server.id}/recommendations`],
     ['POST', `/api/recommendations/${rec.insertId}/dismiss`],
     ['POST', `/api/recommendations/${rec.insertId}/apply`],
+    ['POST', `/api/recommendations/${rec.insertId}/unapply`],
     ['GET', `/api/servers/${server.id}/consultations`],
     ['POST', `/api/servers/${server.id}/consultations`, { authMode: 'api_key' }],
     ['GET', `/api/consultations/${consultation}`],
@@ -353,6 +354,28 @@ test('applying a rule recommendation records when and counts in the report', asy
 
   const report = (await client.req('GET', '/api/reports/savings')).body;
   assert.equal(report.bySource.find((s: { source: string }) => s.source === 'rule').applied, 1);
+
+  const undone = await client.req('POST', `/api/recommendations/${id}/unapply`);
+  assert.equal(undone.status, 200);
+  assert.equal(undone.body.status, 'open');
+  assert.equal(undone.body.appliedAt, null);
+  assert.equal((await client.req('POST', `/api/recommendations/${id}/unapply`)).status, 409);
+  const after = (await client.req('GET', '/api/reports/savings')).body;
+  assert.equal(after.bySource.find((s: { source: string }) => s.source === 'rule').applied, 0);
+});
+
+test('an applied recommendation with executed commands cannot be unapplied', async () => {
+  const { client } = await signup(app.base);
+  const { server } = await addServer(client);
+  const [inserted] = await pool.query("INSERT INTO recommendations (server_id, source, type, detail, status, applied_at) VALUES (?, 'ai', 'idle', '끄기', 'applied', NOW())", [server.id]);
+  const id = (inserted as { insertId: number }).insertId;
+  const consultationId = await insertConsultation(server.id);
+  await pool.query("INSERT INTO tool_calls (consultation_id, recommendation_id, command, tier, decision, exit_code) VALUES (?, ?, 'x', 'approve', 'auto', 0)", [consultationId, id]);
+
+  const res = await client.req('POST', `/api/recommendations/${id}/unapply`);
+  assert.equal(res.status, 409);
+  assert.equal(res.body.error.code, 'has_tool_calls');
+  assert.equal((await one<{ status: string }>('SELECT status FROM recommendations WHERE id = ?', [id]))!.status, 'applied');
 });
 
 test('rule job does not duplicate open recommendations and respects dismissal', async () => {
