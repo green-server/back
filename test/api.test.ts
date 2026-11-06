@@ -210,6 +210,7 @@ test("other users' resources are 404 on every :id route", async () => {
     ['GET', `/api/servers/${server.id}/processes`],
     ['GET', `/api/servers/${server.id}/recommendations`],
     ['POST', `/api/recommendations/${rec.insertId}/dismiss`],
+    ['POST', `/api/recommendations/${rec.insertId}/apply`],
     ['GET', `/api/servers/${server.id}/consultations`],
     ['POST', `/api/servers/${server.id}/consultations`, { authMode: 'api_key' }],
     ['GET', `/api/consultations/${consultation}`],
@@ -336,6 +337,23 @@ function ruleSamples(serverId: number, now: number) {
   const values = Array.from({ length: 24 }, (_, i) => [serverId, new Date(now - (i + 1) * HOUR), 1, 5, 60, 0]);
   return pool.query('INSERT INTO metrics VALUES ?', [values]);
 }
+
+test('applying a rule recommendation records when and counts in the report', async () => {
+  const { client } = await signup(app.base);
+  const { server } = await addServer(client);
+  const [inserted] = await pool.query("INSERT INTO recommendations (server_id, source, type, detail, est_saving_krw) VALUES (?, 'rule', 'idle', '끄기', 900)", [server.id]);
+  const id = (inserted as { insertId: number }).insertId;
+
+  const applied = await client.req('POST', `/api/recommendations/${id}/apply`);
+  assert.equal(applied.status, 200);
+  assert.equal(applied.body.status, 'applied');
+  assert.ok(applied.body.appliedAt);
+  assert.equal((await client.req('POST', `/api/recommendations/${id}/apply`)).status, 409);
+  assert.equal((await client.req('POST', `/api/recommendations/${id}/dismiss`)).status, 409);
+
+  const report = (await client.req('GET', '/api/reports/savings')).body;
+  assert.equal(report.bySource.find((s: { source: string }) => s.source === 'rule').applied, 1);
+});
 
 test('rule job does not duplicate open recommendations and respects dismissal', async () => {
   const { client } = await signup(app.base);

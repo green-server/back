@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { Router, type Request } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { clearSession, hashPassword, requireAuth, setSession, sha256, verifyPassword, type UserRow } from './auth.js';
 import { one, rows, run } from './db.js';
 import { agentOffline, ApiError, invalid, isNumber, isObject, isText, notFound, parseId } from './http.js';
@@ -225,15 +225,20 @@ api.get('/servers/:id/recommendations', async (req, res) => {
   res.json(found.map(toRecommendation));
 });
 
-api.post('/recommendations/:id/dismiss', async (req, res) => {
+async function closeRecommendation(req: Request, res: Response, assignment: string) {
   const select = `SELECT r.* FROM recommendations r JOIN servers s ON s.id = r.server_id WHERE r.id = ? AND s.user_id = ?`;
   const params = [pathId(req), req.user.id];
   const found = await one<RecommendationRow>(select, params);
   if (!found) throw notFound();
   if (found.status !== 'open') throw new ApiError(409, 'not_open', '열려 있는 추천이 아닙니다.');
-  await run("UPDATE recommendations SET status = 'dismissed' WHERE id = ? AND status = 'open'", [found.id]);
+  await run(`UPDATE recommendations SET ${assignment} WHERE id = ? AND status = 'open'`, [found.id]);
   res.json(toRecommendation((await one<RecommendationRow>(select, params))!));
-});
+}
+
+api.post('/recommendations/:id/dismiss', (req, res) => closeRecommendation(req, res, "status = 'dismissed'"));
+
+// applied_at is what the savings report compares before and after.
+api.post('/recommendations/:id/apply', (req, res) => closeRecommendation(req, res, "status = 'applied', applied_at = NOW()"));
 
 api.get('/servers/:id/consultations', async (req, res) => {
   const { id } = await ownedServer(req);
