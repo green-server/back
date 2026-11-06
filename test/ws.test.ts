@@ -447,3 +447,34 @@ test('consultation stream reaches the owner and stops when the consultation ends
   await agent.close();
   await web.close();
 });
+
+test('a plan runs read-only, and its steps travel with the execution', async () => {
+  const { client } = await signup(app.base);
+  const { server, agentToken } = await addServer(client);
+  const agent = await connectAgent(app.wsBase, agentToken);
+  const { insertId } = (await pool.query(
+    "INSERT INTO recommendations (server_id, source, type, detail, est_saving_krw) VALUES (?, 'rule', 'idle', '유휴 서비스', 10)",
+    [server.id],
+  ))[0] as any;
+
+  const planned = await client.req('POST', `/api/recommendations/${insertId}/plan`);
+  assert.equal(planned.status, 201);
+  const start = await agent.next((m) => m.type === 'consultation_start');
+  assert.equal(start.readOnly, true);
+  assert.equal(start.recommendationId, undefined);
+  assert.equal(start.task, '유휴 서비스');
+
+  const running = await client.req('POST', `/api/recommendations/${insertId}/execute`, { planConsultationId: planned.body.id });
+  assert.equal(running.status, 400); // not finished yet
+  agent.send({ type: 'consultation_status', consultationId: planned.body.id, status: 'done', summary: '계획: 끕니다', fixes: ['bluetooth를 끕니다'] });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const executed = await client.req('POST', `/api/recommendations/${insertId}/execute`, { planConsultationId: planned.body.id });
+  assert.equal(executed.status, 201);
+  const run = await agent.next((m) => m.type === 'consultation_start' && m.consultationId === executed.body.id);
+  assert.equal(run.readOnly, undefined);
+  assert.equal(run.recommendationId, insertId);
+  assert.match(run.task, /1\. bluetooth를 끕니다/);
+  assert.equal((await one<{ status: string }>('SELECT status FROM recommendations WHERE id = ?', [insertId]))!.status, 'open');
+  await agent.close();
+});

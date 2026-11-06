@@ -268,7 +268,7 @@ api.get('/servers/:id/consultations', async (req, res) => {
   res.json(found.map(toConsultation));
 });
 
-type Task = { recommendationId: number; task: string };
+type Task = { task: string } & ({ recommendationId: number } | { readOnly: true });
 
 async function startConsultation(userId: number, serverId: number, authMode: string, model: string, task?: Task) {
   if (!isOnline(serverId)) throw agentOffline();
@@ -292,14 +292,37 @@ api.post('/servers/:id/consultations', async (req, res) => {
 
 // Runs the recommendation on the server. It uses the settings of the last consultation,
 // because that auth mode is the one known to work there.
-api.post('/recommendations/:id/execute', async (req, res) => {
-  const found = await ownedRecommendation(req);
+async function openRecommendationSettings(found: { status: string; server_id: number }) {
   if (found.status !== 'open') throw new ApiError(409, 'not_open', '열려 있는 추천이 아닙니다.');
   const last = await one<Pick<ConsultationRow, 'auth_mode' | 'model'>>(
     'SELECT auth_mode, model FROM consultations WHERE server_id = ? ORDER BY id DESC LIMIT 1',
     [found.server_id],
   );
-  const task = { recommendationId: found.id, task: found.detail };
+  return last;
+}
+
+// What the owner read and agreed to is what runs.
+async function planSteps(planConsultationId: unknown, serverId: number) {
+  if (planConsultationId === undefined) return '';
+  const id = parseId(String(planConsultationId));
+  const plan = id === null ? undefined : await one<ConsultationRow>("SELECT * FROM consultations WHERE id = ? AND server_id = ? AND status = 'done'", [id, serverId]);
+  if (!plan) throw invalid('계획을 찾을 수 없습니다.');
+  const steps = toConsultation(plan).fixes.map((step: string, i: number) => `${i + 1}. ${step}`).join('\n');
+  return steps && `\n\n서버 주인이 확인한 계획입니다. 이 순서를 따르세요.\n${steps}`;
+}
+
+api.post('/recommendations/:id/execute', async (req, res) => {
+  const found = await ownedRecommendation(req);
+  const last = await openRecommendationSettings(found);
+  const task = { recommendationId: found.id, task: found.detail + (await planSteps(req.body?.planConsultationId, found.server_id)) };
+  res.status(201).json(await startConsultation(req.user.id, found.server_id, last?.auth_mode ?? 'subscription', last?.model ?? DEFAULT_MODEL, task));
+});
+
+// A look at the real server before anything changes. The agent enforces read-only.
+api.post('/recommendations/:id/plan', async (req, res) => {
+  const found = await ownedRecommendation(req);
+  const last = await openRecommendationSettings(found);
+  const task = { readOnly: true as const, task: found.detail };
   res.status(201).json(await startConsultation(req.user.id, found.server_id, last?.auth_mode ?? 'subscription', last?.model ?? DEFAULT_MODEL, task));
 });
 
