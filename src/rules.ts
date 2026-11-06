@@ -31,7 +31,11 @@ const NIGHT_START_KST = 1; // 01:00 to 07:00
 const NIGHT_HOURS = 6;
 const NIGHT_MIN_SAMPLES = 12; // roughly two full nights
 
-const RUNAWAY_CPU_PCT = 80;
+// Share of the whole machine. One pegged core on a 4 core box is only 25%, so a
+// single-thread hog never reached the old 80%.
+// ponytail: the backend does not know core counts; 20% catches one core on up to 5 cores.
+// Send cores in hello and compare against 100 / cores once 8+ core servers matter.
+const RUNAWAY_CPU_PCT = 20;
 const RUNAWAY_MIN_SHARE = 0.9;
 const RUNAWAY_MIN_SPAN_MIN = 25;
 
@@ -100,7 +104,7 @@ function runawayProcess({ processes, saving }: RuleInput): Finding | null {
   if (!runaway) return null;
   return {
     type: 'runaway_process',
-    detail: `프로세스 ${runaway.first.name}(PID ${runaway.first.pid})가 ${RUNAWAY_WINDOW_MIN}분 가까이 CPU ${RUNAWAY_CPU_PCT}% 이상을 쓰고 있습니다. 평균 ${fmt(runaway.watts)}W를 소비합니다.`,
+    detail: `프로세스 ${runaway.first.name}(PID ${runaway.first.pid})가 ${RUNAWAY_WINDOW_MIN}분 가까이 서버 전체 CPU의 ${RUNAWAY_CPU_PCT}% 이상을 쓰고 있습니다. 평균 ${fmt(runaway.watts)}W를 소비합니다.`,
     estSavingKrw: won(saving(runaway.watts)),
   };
 }

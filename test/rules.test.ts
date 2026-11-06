@@ -75,6 +75,11 @@ test('runaway_process needs a sustained hog', () => {
   assert.ok(!types({ processes: samples(30, 7, (i) => (i % 2 ? 95 : 5)) }).includes('runaway_process'), 'intermittent');
 });
 
+test('runaway_process catches one pegged core on a four core server', () => {
+  assert.ok(types({ processes: samples(30, 7, () => 25) }).includes('runaway_process'));
+  assert.ok(!types({ processes: samples(30, 7, () => 12) }).includes('runaway_process'), 'a busy service is not a runaway');
+});
+
 test('runaway_process counts missed samples against the process', () => {
   const hog = samples(30, 7, () => 95).filter((_, i) => i % 2 === 0);
   assert.ok(!types({ processes: [...hog, ...samples(30, 8, () => 3)] }).includes('runaway_process'));
