@@ -40,7 +40,9 @@ export function ingestDecision(
   decision: 'auto' | 'pending' | 'blocked',
 ): ToolCallRow['decision'] {
   if (decision === 'blocked') return 'blocked';
-  return (tier === 'auto' && decision === 'auto') || (tier === 'approve' && decision === 'pending') ? decision : 'blocked';
+  // Consultations run in auto mode: an approve-tier call arrives as already running.
+  const known = tier === 'approve' || (tier === 'auto' && decision === 'auto');
+  return known ? decision : 'blocked';
 }
 
 type Tracked = {

@@ -29,7 +29,7 @@ test('ingest records every pair outside the contract as blocked', () => {
   assert.equal(ingestDecision('approve', 'blocked'), 'blocked');
   assert.equal(ingestDecision('deny', 'pending'), 'blocked');
   assert.equal(ingestDecision('deny', 'auto'), 'blocked');
-  assert.equal(ingestDecision('approve', 'auto'), 'blocked');
+  assert.equal(ingestDecision('approve', 'auto'), 'auto');
   assert.equal(ingestDecision('auto', 'pending'), 'blocked');
 });
 
