@@ -110,8 +110,12 @@ export type ConsultationRow = {
   server_id: number;
   requested_at: Date;
   auth_mode: 'subscription' | 'api_key';
+  model: string;
   status: 'requested' | 'running' | 'done' | 'failed';
   summary: string | null;
+  server_level: 'good' | 'fair' | 'warning' | 'critical' | null;
+  feedback: string[] | null;
+  fixes: string[] | null;
 };
 
 export const toConsultation = (c: ConsultationRow) => ({
@@ -119,8 +123,12 @@ export const toConsultation = (c: ConsultationRow) => ({
   serverId: c.server_id,
   requestedAt: iso(c.requested_at),
   authMode: c.auth_mode,
+  model: c.model,
   status: c.status,
   summary: c.summary,
+  level: c.server_level,
+  feedback: c.feedback ?? [],
+  fixes: c.fixes ?? [],
 });
 
 export const getConsultation = async (id: number) =>

@@ -68,6 +68,7 @@ test('agent happy path: metrics, consultation, approval, result, report, undo', 
   const start = await agent.next((m) => m.type === 'consultation_start');
   assert.equal(start.consultationId, consultationId);
   assert.equal(start.authMode, 'subscription');
+  assert.equal(start.model, 'claude-sonnet-5-5');
   assert.ok(Number.isInteger(start.maxTurns) && start.maxTurns > 0);
   assert.equal(JSON.stringify(start).match(/token|key"/i), null);
   await web.next((m) => m.type === 'consultation' && m.consultation.status === 'requested');
@@ -108,6 +109,9 @@ test('agent happy path: metrics, consultation, approval, result, report, undo', 
     consultationId,
     status: 'done',
     summary: '게임 서버를 껐습니다.',
+    level: 'critical',
+    feedback: ['유휴 전력이 큽니다.', 7],
+    fixes: ['게임 서버를 중지합니다.'],
     recommendations: [
       { type: 'idle', detail: '주 조치', estSavingKrw: 1200.4 },
       { type: 'custom', detail: '다음 후보', estSavingKrw: 300 },
@@ -127,6 +131,9 @@ test('agent happy path: metrics, consultation, approval, result, report, undo', 
 
   const detail = (await client.req('GET', `/api/consultations/${consultationId}`)).body;
   assert.equal(detail.status, 'done');
+  assert.equal(detail.level, 'critical');
+  assert.deepEqual(detail.feedback, ['유휴 전력이 큽니다.']);
+  assert.deepEqual(detail.fixes, ['게임 서버를 중지합니다.']);
   assert.equal(detail.toolCalls.length, 3);
   assert.equal(detail.toolCalls[2].recommendationId, recs[0].id);
 

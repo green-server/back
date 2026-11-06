@@ -125,8 +125,16 @@ function isRecommendation(r: unknown): r is ReportedRecommendation {
   return isObject(r) && isText(r.type, 40) && isText(r.detail, MAX_TEXT) && isNumber(r.estSavingKrw, -2147483648, 2147483647);
 }
 
+const LEVELS = ['good', 'fair', 'warning', 'critical'];
+const MAX_FEEDBACK = 5;
+const MAX_FIXES = 8;
+const MAX_LINE = 500;
+
+const textList = (v: unknown, max: number) =>
+  Array.isArray(v) ? JSON.stringify(v.filter((s): s is string => typeof s === 'string' && s !== '').slice(0, max).map((s) => s.slice(0, MAX_LINE))) : null;
+
 async function onConsultationStatus(ctx: AgentContext, m: Message): Promise<void> {
-  const { consultationId, status, summary, recommendations } = m;
+  const { consultationId, status, summary, recommendations, level, feedback, fixes } = m;
   if (!isId(consultationId) || (status !== 'running' && status !== 'done' && status !== 'failed')) return;
   // A bad optional field must not leave the consultation stuck: status is what matters here.
   const text = typeof summary === 'string' ? summary.slice(0, MAX_TEXT) : null;
@@ -136,9 +144,17 @@ async function onConsultationStatus(ctx: AgentContext, m: Message): Promise<void
 
   const linkedCalls = await tx(async (c) => {
     const { affectedRows } = await run(
-      `UPDATE consultations SET status = ?, summary = COALESCE(?, summary)
+      `UPDATE consultations SET status = ?, summary = COALESCE(?, summary), server_level = ?, feedback = ?, fixes = ?
        WHERE id = ? AND server_id = ? AND status NOT IN ('done', 'failed')`,
-      [status, text, consultationId, ctx.serverId],
+      [
+        status,
+        text,
+        typeof level === 'string' && LEVELS.includes(level) ? level : null,
+        textList(feedback, MAX_FEEDBACK),
+        textList(fixes, MAX_FIXES),
+        consultationId,
+        ctx.serverId,
+      ],
       c,
     );
     if (!affectedRows) return null;

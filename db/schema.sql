@@ -58,8 +58,12 @@ CREATE TABLE IF NOT EXISTS consultations (
   server_id    BIGINT UNSIGNED NOT NULL,
   requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   auth_mode    ENUM('subscription','api_key') NOT NULL,
+  model        VARCHAR(40) NOT NULL DEFAULT 'claude-sonnet-5-5',
   status       ENUM('requested','running','done','failed') NOT NULL DEFAULT 'requested',
   summary      TEXT NULL,
+  server_level ENUM('good','fair','warning','critical') NULL,
+  feedback     JSON NULL,
+  fixes        JSON NULL,
   CONSTRAINT fk_consult_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
 );
 

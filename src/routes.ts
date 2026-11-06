@@ -24,6 +24,9 @@ import { decide, undo } from './toolCalls.js';
 /** Turn limit per consultation; a run spends the owner's own Claude quota. */
 const MAX_TURNS = 30;
 
+const MODELS = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'];
+const DEFAULT_MODEL = 'claude-sonnet-5-5';
+
 const MIN_PASSWORD = 8;
 const MAX_PASSWORD = 128; // bounds the scrypt work an unauthenticated request can demand
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -240,11 +243,12 @@ api.get('/servers/:id/consultations', async (req, res) => {
 
 api.post('/servers/:id/consultations', async (req, res) => {
   const { id } = await ownedServer(req);
-  const { authMode } = body(req);
+  const { authMode, model = DEFAULT_MODEL } = body(req);
   if (typeof authMode !== 'string' || !AUTH_MODES.includes(authMode)) throw invalid('authMode가 올바르지 않습니다.');
+  if (typeof model !== 'string' || !MODELS.includes(model)) throw invalid('model이 올바르지 않습니다.');
   if (!isOnline(id)) throw agentOffline();
-  const { insertId } = await run('INSERT INTO consultations (server_id, auth_mode) VALUES (?, ?)', [id, authMode]);
-  if (!sendToAgent(id, { type: 'consultation_start', consultationId: insertId, authMode, maxTurns: MAX_TURNS })) {
+  const { insertId } = await run('INSERT INTO consultations (server_id, auth_mode, model) VALUES (?, ?, ?)', [id, authMode, model]);
+  if (!sendToAgent(id, { type: 'consultation_start', consultationId: insertId, authMode, model, maxTurns: MAX_TURNS })) {
     await run("UPDATE consultations SET status = 'failed' WHERE id = ?", [insertId]);
     throw agentOffline();
   }

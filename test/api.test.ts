@@ -467,6 +467,7 @@ test('consultation is refused while the agent is offline', async () => {
   const { server } = await addServer(client);
   const path = `/api/servers/${server.id}/consultations`;
   assert.equal((await client.req('POST', path, { authMode: 'nope' })).status, 400);
+  assert.equal((await client.req('POST', path, { authMode: 'api_key', model: '--dangerously-skip-permissions' })).status, 400);
   const res = await client.req('POST', path, { authMode: 'api_key' });
   assert.equal(res.status, 409);
   assert.equal(res.body.error.code, 'agent_offline');
