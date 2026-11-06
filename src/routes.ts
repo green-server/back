@@ -347,7 +347,7 @@ api.post('/tool-calls/:id/undo', async (req, res) => {
   res.status(202).json(await undo(req.user.id, pathId(req)));
 });
 
-const ACTIVITY_LIMIT = 20;
+const ACTIVITY_LIMIT = 60;
 
 api.get('/reports/activity', async (req, res) => {
   // LEFT JOIN: a server nothing was recommended for still belongs in the table, with zeros.
@@ -363,8 +363,8 @@ api.get('/reports/activity', async (req, res) => {
     [req.user.id],
   );
   // INNER JOIN: a command only exists inside a consultation on a server, so the chain always matches.
-  const calls = await rows<{ id: number; command: string; decision: ToolCallRow['decision']; exit_code: number | null; consultation_id: number; requested_at: Date; server_name: string }>(
-    `SELECT t.id, t.command, t.decision, t.exit_code, c.id AS consultation_id, c.requested_at, s.name AS server_name
+  const calls = await rows<{ id: number; command: string; tier: ToolCallRow['tier']; decision: ToolCallRow['decision']; exit_code: number | null; consultation_id: number; requested_at: Date; server_name: string }>(
+    `SELECT t.id, t.command, t.tier, t.decision, t.exit_code, c.id AS consultation_id, c.requested_at, s.name AS server_name
      FROM tool_calls t
      INNER JOIN consultations c ON c.id = t.consultation_id
      INNER JOIN servers s ON s.id = c.server_id
@@ -385,6 +385,7 @@ api.get('/reports/activity', async (req, res) => {
     calls: calls.map((c) => ({
       id: c.id,
       command: c.command,
+      tier: c.tier,
       decision: c.decision,
       exitCode: c.exit_code,
       consultationId: c.consultation_id,
