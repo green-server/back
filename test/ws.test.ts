@@ -1,5 +1,6 @@
 import { addServer, connect, connectAgent, connectWeb, metric, ORIGIN, resetDb, signup, startApp, toolCall } from './helpers.js';
 import assert from 'node:assert/strict';
+import { createPublicKey, verify } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 import { one, pool } from '../src/db.js';
 
@@ -371,6 +372,46 @@ test('executing a recommendation applies it only when a change really succeeded'
   assert.ok(row.applied_at);
   assert.equal((await client.req('POST', `/api/recommendations/${applied}/unapply`)).body.error.code, 'has_tool_calls');
   assert.equal((await client.req('POST', `/api/recommendations/${applied}/execute`)).status, 409);
+
+  await agent.close();
+  await web.close();
+});
+
+test('only an allowed privileged command is sent back signed', async () => {
+  const { client } = await signup(app.base);
+  const { server, agentToken } = await addServer(client);
+  const web = await connectWeb(app.wsBase, client.cookie);
+  const agent = await connectAgent(app.wsBase, agentToken);
+  const { id: consultationId } = (await client.req('POST', `/api/servers/${server.id}/consultations`, { authMode: 'subscription' })).body;
+  const command = 'greenserver priv docker restart minecraft-server';
+  const undoCommand = 'greenserver priv docker start minecraft-server';
+
+  const ask = async (requestId: string) => {
+    agent.send(toolCall(consultationId, requestId, { command, undoCommand }));
+    return (await web.next((m) => m.type === 'tool_call' && m.toolCall.decision === 'pending')).toolCall;
+  };
+
+  const denied = await ask('p1');
+  await client.req('POST', `/api/tool-calls/${denied.id}/decision`, { decision: 'denied' });
+  const refusal = await agent.next((m) => m.type === 'decision' && m.requestId === 'p1');
+  assert.equal(refusal.grant, undefined);
+
+  const allowed = await ask('p2');
+  await client.req('POST', `/api/tool-calls/${allowed.id}/decision`, { decision: 'approved' });
+  const { grant } = await agent.next((m) => m.type === 'decision' && m.requestId === 'p2');
+  const raw = Buffer.from((await client.req('GET', '/api/grant-public-key')).body.publicKey, 'base64');
+  const key = createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]), format: 'der', type: 'spki' });
+  const message = `green-server-grant-v1\n${server.id}\n${grant.expires}\n${grant.nonce}\n${command}`;
+  assert.ok(verify(null, Buffer.from(message), key, Buffer.from(grant.signature, 'base64')));
+  assert.equal(verify(null, Buffer.from(message.replace('restart', 'stop')), key, Buffer.from(grant.signature, 'base64')), false);
+  assert.ok(grant.expires > Date.now() / 1000);
+
+  agent.send({ type: 'tool_result', requestId: 'p2', exitCode: 0 });
+  await web.next((m) => m.type === 'tool_call' && m.toolCall.id === allowed.id && m.toolCall.exitCode === 0);
+  await client.req('POST', `/api/tool-calls/${allowed.id}/undo`);
+  const undo = await agent.next((m) => m.type === 'undo');
+  assert.equal(undo.command, undoCommand);
+  assert.ok(undo.grant.signature);
 
   await agent.close();
   await web.close();

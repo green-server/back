@@ -18,6 +18,7 @@ import {
   type ServerRow,
   type ToolCallRow,
 } from './models.js';
+import { grantPublicKey } from './grants.js';
 import { savingsReport } from './savings.js';
 import { decide, undo } from './toolCalls.js';
 
@@ -124,6 +125,11 @@ api.post('/auth/login', async (req, res) => {
 api.post('/auth/logout', (_req, res) => {
   clearSession(res);
   res.status(204).end();
+});
+
+// Public on purpose: the root helper installer pins this key.
+api.get('/grant-public-key', (_req, res) => {
+  res.json({ publicKey: grantPublicKey });
 });
 
 api.use(requireAuth);

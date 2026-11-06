@@ -1,6 +1,7 @@
 // The approval state machine. The guards are pure; decide() and undo() apply them under a row lock.
 import type { PoolConnection } from 'mysql2/promise';
 import { one, rows, run, tx } from './db.js';
+import { grantFor } from './grants.js';
 import { broadcast, isOnline, sendToAgent } from './hub.js';
 import { agentOffline, ApiError, notFound } from './http.js';
 import { getToolCall, type ToolCallRow } from './models.js';
@@ -108,7 +109,7 @@ function lockOwned(c: PoolConnection, userId: number, id: number) {
 const conflict = (guard: NonNullable<Guard>) => new ApiError(409, guard.code, guard.message);
 
 export async function decide(userId: number, id: number, decision: Decision) {
-  const entry = await tx(async (c) => {
+  const { entry, command } = await tx(async (c) => {
     const call = await lockOwned(c, userId, id);
     if (!call) throw notFound();
     const guard = decisionGuard(call, decision);
@@ -120,11 +121,12 @@ export async function decide(userId: number, id: number, decision: Decision) {
       [decision, decision, id],
       c,
     );
-    return entry;
+    return { entry, command: call.command };
   });
   clearTimeout(entry.timer);
   delete entry.timer;
-  sendToAgent(entry.serverId, { type: 'decision', requestId: entry.requestId, decision });
+  const grant = decision === 'approved' ? grantFor(entry.serverId, command) : undefined;
+  sendToAgent(entry.serverId, { type: 'decision', requestId: entry.requestId, decision, ...(grant && { grant }) });
   const toolCall = await getToolCall(id);
   broadcast(userId, { type: 'tool_call', toolCall });
   return toolCall;
@@ -146,7 +148,8 @@ export async function undo(userId: number, id: number) {
     );
     return { serverId: call.server_id, undoId: insertId, command: call.undo_command! };
   });
-  sendToAgent(serverId, { type: 'undo', toolCallId: undoId, command });
+  const grant = grantFor(serverId, command);
+  sendToAgent(serverId, { type: 'undo', toolCallId: undoId, command, ...(grant && { grant }) });
   const toolCall = await getToolCall(undoId);
   broadcast(userId, { type: 'tool_call', toolCall });
   return toolCall;
