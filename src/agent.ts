@@ -73,9 +73,10 @@ async function onToolCall(ctx: AgentContext, m: Message): Promise<void> {
 
   const stored = ingestDecision(tier, decision);
   const { insertId } = await run(
-    'INSERT INTO tool_calls (consultation_id, command, tier, decision, undo_command) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO tool_calls (consultation_id, command, tier, decision, undo_command, approved_at) VALUES (?, ?, ?, ?, ?, IF(?, NOW(), NULL))',
     // A bad undoCommand only costs the undo button; the call itself must stay on record.
-    [consultationId, command, tier, stored, isText(undoCommand, MAX_TEXT) ? undoCommand : null],
+    // An approve-tier call reported as auto runs now, so this is also its applied_at.
+    [consultationId, command, tier, stored, isText(undoCommand, MAX_TEXT) ? undoCommand : null, tier === 'approve' && stored === 'auto'],
   );
   if (stored !== 'blocked') {
     track({ ...ctx, requestId, toolCallId: insertId, consultationId }, stored === 'pending');
@@ -134,7 +135,7 @@ const textList = (v: unknown, max: number) =>
   Array.isArray(v) ? JSON.stringify(v.filter((s): s is string => typeof s === 'string' && s !== '').slice(0, max).map((s) => s.slice(0, MAX_LINE))) : null;
 
 async function onConsultationStatus(ctx: AgentContext, m: Message): Promise<void> {
-  const { consultationId, status, summary, recommendations, level, feedback, fixes } = m;
+  const { consultationId, status, summary, recommendations, level, feedback, fixes, recommendationId } = m;
   if (!isId(consultationId) || (status !== 'running' && status !== 'done' && status !== 'failed')) return;
   // A bad optional field must not leave the consultation stuck: status is what matters here.
   const text = typeof summary === 'string' ? summary.slice(0, MAX_TEXT) : null;
@@ -173,12 +174,16 @@ async function onConsultationStatus(ctx: AgentContext, m: Message): Promise<void
     const applied = await rows<Pick<ToolCallRow, 'id' | 'approved_at'>>(
       `SELECT t.id, t.approved_at FROM tool_calls t
        LEFT JOIN tool_calls u ON u.undo_of = t.id AND u.exit_code = 0
-       WHERE t.consultation_id = ? AND t.decision = 'approved' AND t.exit_code = 0
+       WHERE t.consultation_id = ? AND t.tier = 'approve' AND t.decision IN ('auto', 'approved') AND t.exit_code = 0
          AND t.undo_of IS NULL AND u.id IS NULL`,
       [consultationId],
       c,
     );
-    const [first] = ids;
+    // The owner asked for this one: it takes the effect, and nothing else is credited.
+    const target = isId(recommendationId)
+      ? await one<{ id: number }>("SELECT id FROM recommendations WHERE id = ? AND server_id = ? AND status = 'open'", [recommendationId, ctx.serverId], c)
+      : undefined;
+    const first = target?.id ?? ids[0];
     if (first === undefined || applied.length === 0) return [];
     // ponytail: api.md does not say which recommendation a call served. The agent changes one thing
     // at a time, so the lead recommendation takes the measured effect and the rest stay open; marking

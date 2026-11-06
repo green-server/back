@@ -261,20 +261,39 @@ api.get('/servers/:id/consultations', async (req, res) => {
   res.json(found.map(toConsultation));
 });
 
+type Task = { recommendationId: number; task: string };
+
+async function startConsultation(userId: number, serverId: number, authMode: string, model: string, task?: Task) {
+  if (!isOnline(serverId)) throw agentOffline();
+  const { insertId } = await run('INSERT INTO consultations (server_id, auth_mode, model) VALUES (?, ?, ?)', [serverId, authMode, model]);
+  if (!sendToAgent(serverId, { type: 'consultation_start', consultationId: insertId, authMode, model, maxTurns: MAX_TURNS, ...task })) {
+    await run("UPDATE consultations SET status = 'failed' WHERE id = ?", [insertId]);
+    throw agentOffline();
+  }
+  const consultation = await getConsultation(insertId);
+  broadcast(userId, { type: 'consultation', consultation });
+  return consultation;
+}
+
 api.post('/servers/:id/consultations', async (req, res) => {
   const { id } = await ownedServer(req);
   const { authMode, model = DEFAULT_MODEL } = body(req);
   if (typeof authMode !== 'string' || !AUTH_MODES.includes(authMode)) throw invalid('authMode가 올바르지 않습니다.');
   if (typeof model !== 'string' || !MODELS.includes(model)) throw invalid('model이 올바르지 않습니다.');
-  if (!isOnline(id)) throw agentOffline();
-  const { insertId } = await run('INSERT INTO consultations (server_id, auth_mode, model) VALUES (?, ?, ?)', [id, authMode, model]);
-  if (!sendToAgent(id, { type: 'consultation_start', consultationId: insertId, authMode, model, maxTurns: MAX_TURNS })) {
-    await run("UPDATE consultations SET status = 'failed' WHERE id = ?", [insertId]);
-    throw agentOffline();
-  }
-  const consultation = await getConsultation(insertId);
-  broadcast(req.user.id, { type: 'consultation', consultation });
-  res.status(201).json(consultation);
+  res.status(201).json(await startConsultation(req.user.id, id, authMode, model));
+});
+
+// Runs the recommendation on the server. It uses the settings of the last consultation,
+// because that auth mode is the one known to work there.
+api.post('/recommendations/:id/execute', async (req, res) => {
+  const found = await ownedRecommendation(req);
+  if (found.status !== 'open') throw new ApiError(409, 'not_open', '열려 있는 추천이 아닙니다.');
+  const last = await one<Pick<ConsultationRow, 'auth_mode' | 'model'>>(
+    'SELECT auth_mode, model FROM consultations WHERE server_id = ? ORDER BY id DESC LIMIT 1',
+    [found.server_id],
+  );
+  const task = { recommendationId: found.id, task: found.detail };
+  res.status(201).json(await startConsultation(req.user.id, found.server_id, last?.auth_mode ?? 'subscription', last?.model ?? DEFAULT_MODEL, task));
 });
 
 api.get('/consultations/:id', async (req, res) => {

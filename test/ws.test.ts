@@ -331,3 +331,47 @@ test('deleting a server drops its agent and revokes the token', async () => {
   await closed;
   await rejects(connectAgent(app.wsBase, agentToken), 401);
 });
+
+test('executing a recommendation applies it only when a change really succeeded', async () => {
+  const { client } = await signup(app.base);
+  const { server, agentToken } = await addServer(client);
+  const web = await connectWeb(app.wsBase, client.cookie);
+  const agent = await connectAgent(app.wsBase, agentToken);
+  await client.req('POST', `/api/servers/${server.id}/consultations`, { authMode: 'subscription', model: 'claude-opus-5-5' });
+  await agent.next((m) => m.type === 'consultation_start');
+  const insert = async () => {
+    const [r] = await pool.query("INSERT INTO recommendations (server_id, source, type, detail) VALUES (?, 'rule', 'idle', '서버를 끕니다.')", [server.id]);
+    return (r as { insertId: number }).insertId;
+  };
+  const status = async (id: number) => (await one<{ status: string; applied_at: Date | null }>('SELECT status, applied_at FROM recommendations WHERE id = ?', [id]))!;
+
+  // Nothing ran: the report may claim anything, the recommendation stays open.
+  const untouched = await insert();
+  const first = await client.req('POST', `/api/recommendations/${untouched}/execute`);
+  assert.equal(first.status, 201);
+  const start = await agent.next((m) => m.type === 'consultation_start' && m.recommendationId === untouched);
+  assert.equal(start.task, '서버를 끕니다.');
+  assert.equal(start.authMode, 'subscription');
+  assert.equal(start.model, 'claude-opus-5-5');
+  agent.send({ type: 'consultation_status', consultationId: first.body.id, status: 'done', summary: '했습니다.', recommendationId: untouched });
+  await web.next((m) => m.type === 'consultation' && m.consultation.id === first.body.id && m.consultation.status === 'done');
+  assert.equal((await status(untouched)).status, 'open');
+
+  // A change that ran with no human gate counts, and is linked for the savings report.
+  const applied = await insert();
+  const second = await client.req('POST', `/api/recommendations/${applied}/execute`);
+  await agent.next((m) => m.type === 'consultation_start' && m.recommendationId === applied);
+  agent.send(toolCall(second.body.id, 'run-1', { tier: 'approve', decision: 'auto' }));
+  agent.send({ type: 'tool_result', requestId: 'run-1', exitCode: 0 });
+  await web.next((m) => m.type === 'tool_call' && m.toolCall.exitCode === 0);
+  agent.send({ type: 'consultation_status', consultationId: second.body.id, status: 'done', summary: '껐습니다.', recommendationId: applied });
+  await web.next((m) => m.type === 'consultation' && m.consultation.id === second.body.id && m.consultation.status === 'done');
+  const row = await status(applied);
+  assert.equal(row.status, 'applied');
+  assert.ok(row.applied_at);
+  assert.equal((await client.req('POST', `/api/recommendations/${applied}/unapply`)).body.error.code, 'has_tool_calls');
+  assert.equal((await client.req('POST', `/api/recommendations/${applied}/execute`)).status, 409);
+
+  await agent.close();
+  await web.close();
+});
