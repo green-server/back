@@ -284,6 +284,7 @@ test('summary projects month-to-date from metrics and metrics_hourly without dou
   const expected = toDate + (month.remainingHours * 100) / 1000;
   assert.ok(Math.abs(body.monthlyKwh - expected) < 0.05, `${body.monthlyKwh} vs ${expected}`);
   assert.equal(body.latestWatts, 100);
+  assert.equal(body.weekWatts, 100);
   assert.equal(body.isEstimated, true);
   assert.ok(body.monthlyKrw > 0);
 });
