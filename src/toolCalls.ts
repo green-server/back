@@ -55,8 +55,7 @@ type Tracked = {
   timer?: NodeJS.Timeout;
 };
 
-// ponytail: requestId lives only here because tool_calls has no column for it, so a backend restart
-// strands in-flight calls (denyStalePending cleans those up). Add a request_id column to persist it.
+// Live calls by request id. tool_calls.request_id keeps the link across a restart; this adds the timer.
 const tracked = new Map<string, Tracked>();
 const key = (serverId: number, requestId: string) => `${serverId}:${requestId}`;
 
@@ -126,7 +125,12 @@ export async function decide(userId: number, id: number, decision: Decision) {
   clearTimeout(entry.timer);
   delete entry.timer;
   const grant = decision === 'approved' ? grantFor(entry.serverId, command) : undefined;
-  sendToAgent(entry.serverId, { type: 'decision', requestId: entry.requestId, decision, ...(grant && { grant }) });
+  if (!sendToAgent(entry.serverId, { type: 'decision', requestId: entry.requestId, decision, ...(grant && { grant }) })) {
+    // The link dropped after the check: the agent never heard, so the call is still waiting.
+    await run("UPDATE tool_calls SET decision = 'pending', approved_at = NULL WHERE id = ?", [id]);
+    track(entry, true);
+    throw agentOffline();
+  }
   const toolCall = await getToolCall(id);
   broadcast(userId, { type: 'tool_call', toolCall });
   return toolCall;
@@ -149,7 +153,11 @@ export async function undo(userId: number, id: number) {
     return { serverId: call.server_id, undoId: insertId, command: call.undo_command! };
   });
   const grant = grantFor(serverId, command);
-  sendToAgent(serverId, { type: 'undo', toolCallId: undoId, command, ...(grant && { grant }) });
+  if (!sendToAgent(serverId, { type: 'undo', toolCallId: undoId, command, ...(grant && { grant }) })) {
+    // Nothing ran, so the row must not count as an undo in flight and block a retry.
+    await run('DELETE FROM tool_calls WHERE id = ?', [undoId]);
+    throw agentOffline();
+  }
   const toolCall = await getToolCall(undoId);
   broadcast(userId, { type: 'tool_call', toolCall });
   return toolCall;

@@ -49,9 +49,10 @@ export function kstMonth(now: Date) {
 
 export type KstMonth = ReturnType<typeof kstMonth>;
 
-export function monthlyCostKrw(plan: RatePlan, serverKwh: number, m: KstMonth): number {
+/** billedHours: the hours a cloud instance runs this month; a whole month unless known. */
+export function monthlyCostKrw(plan: RatePlan, serverKwh: number, m: KstMonth, billedHours = m.hours): number {
   return plan.ratePlan === 'cloud_hourly'
-    ? (plan.hourlyKrw ?? 0) * m.hours
+    ? (plan.hourlyKrw ?? 0) * Math.min(billedHours, m.hours)
     : marginalHomeCostKrw(plan.householdKwh, serverKwh, m.month);
 }
 

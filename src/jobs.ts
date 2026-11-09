@@ -22,20 +22,31 @@ export async function rollup(now = new Date()): Promise<void> {
   // One short transaction per server. `ts < ?` alone cannot use the (server_id, ts) key, so a single
   // pass would scan and lock whole tables and stall every agent's inserts behind it.
   for (const { id } of await rows<{ id: number }>('SELECT id FROM servers')) {
-    await tx(async (c) => {
-      await run(
-        `INSERT INTO metrics_hourly (server_id, hour, avg_watts, kwh)
-         SELECT * FROM (
-           SELECT server_id, ${hourBucket} AS h, AVG(watts) AS w, SUM(watts) * ? / 3600000 AS k
-           FROM metrics WHERE server_id = ? AND ts < ? GROUP BY server_id, h
-         ) AS n
-         ON DUPLICATE KEY UPDATE kwh = metrics_hourly.kwh + n.k, avg_watts = (metrics_hourly.avg_watts + n.w) / 2`,
-        [METRIC_INTERVAL_SEC, id, cutoff],
-        c,
-      );
-      await run('DELETE FROM metrics WHERE server_id = ? AND ts < ?', [id, cutoff], c);
-      await run('DELETE FROM process_samples WHERE server_id = ? AND ts < ?', [id, cutoff], c);
-    });
+    await perServer(id, () =>
+      tx(async (c) => {
+        await run(
+          `INSERT INTO metrics_hourly (server_id, hour, avg_watts, kwh)
+           SELECT * FROM (
+             SELECT server_id, ${hourBucket} AS h, AVG(watts) AS w, SUM(watts) * ? / 3600000 AS k
+             FROM metrics WHERE server_id = ? AND ts < ? GROUP BY server_id, h
+           ) AS n
+           ON DUPLICATE KEY UPDATE kwh = metrics_hourly.kwh + n.k, avg_watts = (metrics_hourly.avg_watts + n.w) / 2`,
+          [METRIC_INTERVAL_SEC, id, cutoff],
+          c,
+        );
+        await run('DELETE FROM metrics WHERE server_id = ? AND ts < ?', [id, cutoff], c);
+        await run('DELETE FROM process_samples WHERE server_id = ? AND ts < ?', [id, cutoff], c);
+      }),
+    );
+  }
+}
+
+/** One server's failure is logged and the rest of the tick still runs. */
+async function perServer(id: number, job: () => Promise<unknown>): Promise<void> {
+  try {
+    await job();
+  } catch (err) {
+    console.error(`server ${id}:`, err);
   }
 }
 
@@ -63,17 +74,19 @@ async function findingsFor(server: ServerRow, now: Date): Promise<Finding[]> {
 
 export async function runRules(now = new Date()): Promise<void> {
   for (const server of await rows<ServerRow>('SELECT * FROM servers')) {
-    for (const f of await findingsFor(server, now)) {
-      await run(
-        `INSERT INTO recommendations (server_id, source, type, detail, est_saving_krw)
-         SELECT ?, 'rule', ?, ?, ? FROM DUAL
-         WHERE NOT EXISTS (
-           SELECT 1 FROM recommendations
-           WHERE server_id = ? AND type = ? AND (status = 'open' OR created_at > ? - INTERVAL ? DAY)
-         )`,
-        [server.id, f.type, f.detail, f.estSavingKrw, server.id, f.type, now, RENOTIFY_DAYS],
-      );
-    }
+    await perServer(server.id, async () => {
+      for (const f of await findingsFor(server, now)) {
+        await run(
+          `INSERT INTO recommendations (server_id, source, type, detail, est_saving_krw)
+           SELECT ?, 'rule', ?, ?, ? FROM DUAL
+           WHERE NOT EXISTS (
+             SELECT 1 FROM recommendations
+             WHERE server_id = ? AND type = ? AND (status = 'open' OR created_at > ? - INTERVAL ? DAY)
+           )`,
+          [server.id, f.type, f.detail, f.estSavingKrw, server.id, f.type, now, RENOTIFY_DAYS],
+        );
+      }
+    });
   }
 }
 

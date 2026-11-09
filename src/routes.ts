@@ -37,6 +37,26 @@ const RATE_PLANS = ['home_tiered', 'cloud_hourly'];
 const AUTH_MODES = ['subscription', 'api_key'];
 const MAX_HOURLY_KRW = 99_999_999.99; // DECIMAL(10,2)
 const MAX_HOUSEHOLD_KWH = 4_294_967_295; // INT UNSIGNED
+const LOGIN_WINDOW_MS = 15 * 60_000;
+const MAX_LOGIN_FAILURES = 10;
+const MAX_TRACKED_EMAILS = 10_000;
+
+// Failed logins per email, so one account cannot be guessed at. Keyed by email, not IP: behind the
+// proxy every request shares one address.
+// ponytail: in-process and cleared wholesale at the cap; a shared store if the backend scales out.
+const loginFailures = new Map<string, { count: number; since: number }>();
+
+function loginLocked(email: string): boolean {
+  const f = loginFailures.get(email);
+  if (f && Date.now() - f.since > LOGIN_WINDOW_MS) loginFailures.delete(email);
+  return (loginFailures.get(email)?.count ?? 0) >= MAX_LOGIN_FAILURES;
+}
+
+function recordLoginFailure(email: string): void {
+  if (loginFailures.size >= MAX_TRACKED_EMAILS) loginFailures.clear();
+  const f = loginFailures.get(email) ?? { count: 0, since: Date.now() };
+  loginFailures.set(email, { ...f, count: f.count + 1 });
+}
 
 /** [window seconds, bucket seconds]. 7 days of 10-second samples would be 60,000 rows per chart. */
 const METRIC_RANGES: Record<string, [number, number]> = {
@@ -99,7 +119,7 @@ api.post('/auth/signup', async (req, res) => {
       name.trim(),
       hash,
     ]);
-    setSession(res, insertId);
+    setSession(res, insertId, hash);
     const user = await one<UserRow>('SELECT id, email, name, created_at FROM users WHERE id = ?', [insertId]);
     res.status(201).json(toUser(user!));
   } catch (err) {
@@ -115,11 +135,15 @@ api.post('/auth/login', async (req, res) => {
   if (!isText(email, 255) || typeof password !== 'string' || password.length > MAX_PASSWORD) {
     throw invalid('이메일과 비밀번호를 입력해 주세요.');
   }
-  const user = await one<UserRow & { password_hash: string }>('SELECT * FROM users WHERE email = ?', [email.trim().toLowerCase()]);
+  const key = email.trim().toLowerCase();
+  if (loginLocked(key)) throw new ApiError(429, 'too_many_attempts', '로그인 시도가 너무 많습니다. 15분 뒤에 다시 시도하세요.');
+  const user = await one<UserRow & { password_hash: string }>('SELECT * FROM users WHERE email = ?', [key]);
   if (!(await verifyPassword(password, user?.password_hash)) || !user) {
+    recordLoginFailure(key);
     throw new ApiError(401, 'invalid_credentials', '이메일 또는 비밀번호가 올바르지 않습니다.');
   }
-  setSession(res, user.id);
+  loginFailures.delete(key);
+  setSession(res, user.id, user.password_hash);
   res.json(toUser(user));
 });
 
@@ -144,7 +168,13 @@ api.patch('/me', async (req, res) => {
   if (name !== undefined && !isText(name, 50)) throw invalid('이름은 1~50자여야 합니다.');
   if (password !== undefined && !isPassword(password)) throw invalid(`비밀번호는 ${MIN_PASSWORD}~${MAX_PASSWORD}자여야 합니다.`);
   if (name !== undefined) await run('UPDATE users SET name = ? WHERE id = ?', [name.trim(), req.user.id]);
-  if (password !== undefined) await run('UPDATE users SET password_hash = ? WHERE id = ?', [await hashPassword(password), req.user.id]);
+  if (password !== undefined) {
+    const hash = await hashPassword(password);
+    await run('UPDATE users SET password_hash = ? WHERE id = ?', [hash, req.user.id]);
+    // Every other session ends; this browser gets a new cookie, and its socket reconnects with it.
+    setSession(res, req.user.id, hash);
+    closeWebClients(req.user.id, 'password changed');
+  }
   res.json(toUser({ ...req.user, name: name?.trim() ?? req.user.name }));
 });
 

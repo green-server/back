@@ -2,7 +2,8 @@ import { addServer, connect, connectAgent, connectWeb, metric, ORIGIN, resetDb, 
 import assert from 'node:assert/strict';
 import { createPublicKey, verify } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
-import { one, pool } from '../src/db.js';
+import { one, pool, rows } from '../src/db.js';
+import { settle } from '../src/toolCalls.js';
 
 let app: Awaited<ReturnType<typeof startApp>>;
 
@@ -477,4 +478,82 @@ test('a plan runs read-only, and its steps travel with the execution', async () 
   assert.match(run.task, /1\. bluetooth를 끕니다/);
   assert.equal((await one<{ status: string }>('SELECT status FROM recommendations WHERE id = ?', [insertId]))!.status, 'open');
   await agent.close();
+});
+
+test('a result that arrives after a backend restart still lands, and a re-sent call is not doubled', async () => {
+  const { client } = await signup(app.base);
+  const { server, agentToken } = await addServer(client);
+  const web = await connectWeb(app.wsBase, client.cookie);
+  const agent = await connectAgent(app.wsBase, agentToken);
+  const started = await client.req('POST', `/api/servers/${server.id}/consultations`, { authMode: 'subscription' });
+  await agent.next((m) => m.type === 'consultation_start');
+  const call = toolCall(started.body.id, 'r-1', { command: 'ps aux', tier: 'auto', decision: 'auto', undoCommand: null });
+  agent.send(call);
+  await web.next((m) => m.type === 'tool_call' && m.toolCall.command === 'ps aux');
+  settle(server.id, 'r-1'); // what a restart does to the in-memory tracking
+  agent.send(call);
+  agent.send({ type: 'tool_result', requestId: 'r-1', exitCode: 0 });
+  await web.next((m) => m.type === 'tool_call' && m.toolCall.exitCode === 0);
+  assert.equal((await rows('SELECT id FROM tool_calls WHERE request_id = ?', ['r-1'])).length, 1);
+  await agent.close();
+  await web.close();
+});
+
+test('undoing one of two commands keeps the recommendation applied until both are undone', async () => {
+  const { client } = await signup(app.base);
+  const { server, agentToken } = await addServer(client);
+  const agent = await connectAgent(app.wsBase, agentToken);
+  const [c] = await pool.query("INSERT INTO consultations (server_id, auth_mode, status) VALUES (?, 'api_key', 'done')", [server.id]);
+  const consultationId = (c as { insertId: number }).insertId;
+  const [r] = await pool.query(
+    "INSERT INTO recommendations (server_id, source, type, detail, status, applied_at) VALUES (?, 'ai', 'idle', 'd', 'applied', NOW())",
+    [server.id],
+  );
+  const recId = (r as { insertId: number }).insertId;
+  const insert = async (command: string) => {
+    const [t] = await pool.query('INSERT INTO tool_calls SET ?', [
+      { consultation_id: consultationId, recommendation_id: recId, command, tier: 'approve', decision: 'approved', exit_code: 0, undo_command: `undo ${command}` },
+    ]);
+    return (t as { insertId: number }).insertId;
+  };
+  const status = async () => (await one<{ status: string }>('SELECT status FROM recommendations WHERE id = ?', [recId]))!.status;
+  const undoOne = async (id: number) => {
+    const res = await client.req('POST', `/api/tool-calls/${id}/undo`);
+    assert.equal(res.status, 202);
+    await agent.next((m) => m.type === 'undo' && m.toolCallId === res.body.id);
+    agent.send({ type: 'undo_result', toolCallId: res.body.id, exitCode: 0 });
+    for (let i = 0; i < 100 && (await one('SELECT id FROM tool_calls WHERE id = ? AND exit_code = 0', [res.body.id])) === undefined; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  const a = await insert('a');
+  const b = await insert('b');
+  await undoOne(a);
+  assert.equal(await status(), 'applied');
+  await undoOne(b);
+  for (let i = 0; i < 100 && (await status()) !== 'open'; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(await status(), 'open');
+  await agent.close();
+});
+
+test('a negative AI saving is dropped and a long Hangul summary is clipped to fit', async () => {
+  const { client } = await signup(app.base);
+  const { server, agentToken } = await addServer(client);
+  const web = await connectWeb(app.wsBase, client.cookie);
+  const agent = await connectAgent(app.wsBase, agentToken);
+  const started = await client.req('POST', `/api/servers/${server.id}/consultations`, { authMode: 'subscription' });
+  await agent.next((m) => m.type === 'consultation_start');
+  agent.send({
+    type: 'consultation_status',
+    consultationId: started.body.id,
+    status: 'done',
+    summary: '가'.repeat(30_000),
+    recommendations: [{ type: 'idle', detail: '음수', estSavingKrw: -500 }],
+  });
+  const done = await web.next((m) => m.type === 'consultation' && m.consultation.status === 'done');
+  assert.ok(Buffer.byteLength(done.consultation.summary) <= 65_535);
+  assert.ok(done.consultation.summary.length > 20_000);
+  assert.deepEqual((await client.req('GET', `/api/servers/${server.id}/recommendations`)).body, []);
+  await agent.close();
+  await web.close();
 });

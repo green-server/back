@@ -13,12 +13,22 @@ const MAX_PROCESSES = 200;
 const MAX_RECOMMENDATIONS = 20;
 const MAX_FUTURE_SKEW_MS = 5 * 60_000;
 export const RAW_RETENTION_MS = 7 * 24 * 3_600_000;
-const MAX_TEXT = 60_000; // TEXT columns hold 64 KB
+const MAX_TEXT = 60_000;
+const TEXT_BYTES = 65_535; // a TEXT column holds bytes, and Hangul takes 3 per character
+const LIVE_MS = 60_000; // older samples are a backlog from an outage, not news for an open page
 const MAX_STREAM_TEXT = 8_000;
 const STREAM_KINDS = ['text', 'command', 'output'];
 
 const isInt32 = (v: unknown): v is number => Number.isInteger(v) && isNumber(v, -2147483648, 2147483647);
 const isId = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) > 0;
+
+const encoder = new TextEncoder();
+const fitsText = (v: unknown): v is string => isText(v, MAX_TEXT) && Buffer.byteLength(v) <= TEXT_BYTES;
+/** Cuts at a character boundary so the result fits a TEXT column. */
+function clipText(v: string): string {
+  const { read } = encoder.encodeInto(v, new Uint8Array(TEXT_BYTES));
+  return v.slice(0, read);
+}
 
 const ownsConsultation = (ctx: AgentContext, id: number) =>
   one('SELECT id FROM consultations WHERE id = ? AND server_id = ?', [id, ctx.serverId]);
@@ -62,6 +72,7 @@ async function onMetrics(ctx: AgentContext, m: Message): Promise<void> {
     }
     await run('UPDATE servers SET last_seen_at = NOW() WHERE id = ?', [ctx.serverId], c);
   });
+  if (age > LIVE_MS) return;
   broadcast(ctx.userId, {
     type: 'metric',
     serverId: ctx.serverId,
@@ -76,18 +87,21 @@ async function onMetrics(ctx: AgentContext, m: Message): Promise<void> {
 
 async function onToolCall(ctx: AgentContext, m: Message): Promise<void> {
   const { consultationId, requestId, command, tier, decision, undoCommand } = m;
-  if (!isId(consultationId) || !isText(requestId, 255) || !isText(command, MAX_TEXT)) return;
+  if (!isId(consultationId) || !isText(requestId, 255) || !fitsText(command)) return;
   if (tier !== 'auto' && tier !== 'approve' && tier !== 'deny') return;
   if (decision !== 'auto' && decision !== 'pending' && decision !== 'blocked') return;
   if (isTracked(ctx.serverId, requestId) || !(await ownsConsultation(ctx, consultationId))) return;
 
   const stored = ingestDecision(tier, decision);
-  const { insertId } = await run(
-    'INSERT INTO tool_calls (consultation_id, command, tier, decision, undo_command, approved_at) VALUES (?, ?, ?, ?, ?, IF(?, NOW(), NULL))',
+  // IGNORE: the agent re-sends queued records after a reconnect, and the unique key catches a repeat.
+  const { insertId, affectedRows } = await run(
+    `INSERT IGNORE INTO tool_calls (consultation_id, request_id, command, tier, decision, undo_command, approved_at)
+     VALUES (?, ?, ?, ?, ?, ?, IF(?, NOW(), NULL))`,
     // A bad undoCommand only costs the undo button; the call itself must stay on record.
     // An approve-tier call reported as auto runs now, so this is also its applied_at.
-    [consultationId, command, tier, stored, isText(undoCommand, MAX_TEXT) ? undoCommand : null, tier === 'approve' && stored === 'auto'],
+    [consultationId, requestId, command, tier, stored, fitsText(undoCommand) ? undoCommand : null, tier === 'approve' && stored === 'auto'],
   );
+  if (!affectedRows) return;
   if (stored !== 'blocked') {
     track({ ...ctx, requestId, toolCallId: insertId, consultationId }, stored === 'pending');
   }
@@ -97,7 +111,14 @@ async function onToolCall(ctx: AgentContext, m: Message): Promise<void> {
 async function onToolResult(ctx: AgentContext, m: Message): Promise<void> {
   const { requestId, exitCode } = m;
   if (!isText(requestId, 255) || (exitCode !== null && !isInt32(exitCode))) return;
-  const entry = settle(ctx.serverId, requestId);
+  // After a backend restart the call is no longer tracked, but its row still has the request id.
+  const entry =
+    settle(ctx.serverId, requestId) ??
+    (await one<{ toolCallId: number }>(
+      `SELECT t.id AS toolCallId FROM tool_calls t JOIN consultations c ON c.id = t.consultation_id
+       WHERE c.server_id = ? AND t.request_id = ?`,
+      [ctx.serverId, requestId],
+    ));
   if (!entry) return;
   // No exit code on a pending call: the agent gave up waiting (timeout or lost link) and treats it as denied.
   // settle() has already stopped the expiry timer, so nothing else would close it.
@@ -121,9 +142,16 @@ async function onUndoResult(ctx: AgentContext, m: Message): Promise<void> {
   );
   if (!affectedRows) return;
   if (exitCode === 0) {
+    // Reopen only when nothing the recommendation changed is still in place.
     await run(
       `UPDATE recommendations r JOIN tool_calls t ON t.recommendation_id = r.id
-       SET r.status = 'open', r.applied_at = NULL WHERE t.id = ?`,
+       SET r.status = 'open', r.applied_at = NULL
+       WHERE t.id = ? AND NOT EXISTS (
+         SELECT 1 FROM tool_calls k
+         LEFT JOIN tool_calls u ON u.undo_of = k.id AND u.exit_code = 0
+         WHERE k.recommendation_id = r.id AND k.undo_of IS NULL AND k.exit_code = 0
+           AND k.decision IN ('auto', 'approved') AND u.id IS NULL
+       )`,
       [toolCallId],
     );
   }
@@ -133,7 +161,7 @@ async function onUndoResult(ctx: AgentContext, m: Message): Promise<void> {
 type ReportedRecommendation = { type: string; detail: string; estSavingKrw: number };
 
 function isRecommendation(r: unknown): r is ReportedRecommendation {
-  return isObject(r) && isText(r.type, 40) && isText(r.detail, MAX_TEXT) && isNumber(r.estSavingKrw, -2147483648, 2147483647);
+  return isObject(r) && isText(r.type, 40) && fitsText(r.detail) && isNumber(r.estSavingKrw, 0, 2147483647);
 }
 
 const LEVELS = ['good', 'fair', 'warning', 'critical'];
@@ -148,7 +176,7 @@ async function onConsultationStatus(ctx: AgentContext, m: Message): Promise<void
   const { consultationId, status, summary, recommendations, level, feedback, fixes, recommendationId } = m;
   if (!isId(consultationId) || (status !== 'running' && status !== 'done' && status !== 'failed')) return;
   // A bad optional field must not leave the consultation stuck: status is what matters here.
-  const text = typeof summary === 'string' ? summary.slice(0, MAX_TEXT) : null;
+  const text = typeof summary === 'string' ? clipText(summary.slice(0, MAX_TEXT)) : null;
   const reported = Array.isArray(recommendations)
     ? recommendations.filter(isRecommendation).slice(0, MAX_RECOMMENDATIONS)
     : [];

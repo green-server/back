@@ -46,23 +46,38 @@ type SummaryRow = ServerRow & {
   latest_watts: number | null;
   latest_estimated: number | null;
   sample_watts: number;
+  sample_hours: number;
   hourly_kwh: number;
+  hourly_hours: number;
   recent_watts: number | null;
 };
 
-/** One statement, so the month-to-date sum cannot straddle a rollup commit. */
+/**
+ * One statement, so the month-to-date sum cannot straddle a rollup commit.
+ * A cloud instance is billed for the hours it reported this month plus the rest of the month,
+ * so one created mid-month or stopped for a week is not charged for those hours.
+ */
 export async function serverSummaries(userId: number, isOnline: (id: number) => boolean, serverId?: number) {
   const now = new Date();
   const month = kstMonth(now);
   const recentSince = new Date(now.getTime() - RECENT_WATTS_HOURS * 3_600_000);
   const found = await rows<SummaryRow>(
-    `SELECT s.*,
-       (SELECT m.watts FROM metrics m WHERE m.server_id = s.id ORDER BY m.ts DESC LIMIT 1) AS latest_watts,
-       (SELECT m.is_estimated FROM metrics m WHERE m.server_id = s.id ORDER BY m.ts DESC LIMIT 1) AS latest_estimated,
-       (SELECT COALESCE(SUM(m.watts), 0) FROM metrics m WHERE m.server_id = s.id AND m.ts >= ?) AS sample_watts,
-       (SELECT COALESCE(SUM(h.kwh), 0) FROM metrics_hourly h WHERE h.server_id = s.id AND h.hour >= ?) AS hourly_kwh,
-       (SELECT AVG(m.watts) FROM metrics m WHERE m.server_id = s.id AND m.ts >= ?) AS recent_watts
-     FROM servers s WHERE s.user_id = ? AND (? IS NULL OR s.id = ?) ORDER BY s.id`,
+    `SELECT s.*, l.watts AS latest_watts, l.is_estimated AS latest_estimated,
+       mt.sample_watts, mt.sample_hours, hr.hourly_kwh, hr.hourly_hours, rc.recent_watts
+     FROM servers s
+     LEFT JOIN LATERAL (
+       SELECT m.watts, m.is_estimated FROM metrics m WHERE m.server_id = s.id ORDER BY m.ts DESC LIMIT 1
+     ) l ON TRUE
+     JOIN LATERAL (
+       SELECT COALESCE(SUM(m.watts), 0) AS sample_watts, COUNT(DISTINCT DATE_FORMAT(m.ts, '%Y-%m-%d %H')) AS sample_hours
+       FROM metrics m WHERE m.server_id = s.id AND m.ts >= ?
+     ) mt ON TRUE
+     JOIN LATERAL (
+       SELECT COALESCE(SUM(h.kwh), 0) AS hourly_kwh, COUNT(*) AS hourly_hours
+       FROM metrics_hourly h WHERE h.server_id = s.id AND h.hour >= ?
+     ) hr ON TRUE
+     JOIN LATERAL (SELECT AVG(m.watts) AS recent_watts FROM metrics m WHERE m.server_id = s.id AND m.ts >= ?) rc ON TRUE
+     WHERE s.user_id = ? AND (? IS NULL OR s.id = ?) ORDER BY s.id`,
     [month.start, month.start, recentSince, userId, serverId ?? null, serverId ?? null],
   );
   return found.map((s) => {
@@ -74,7 +89,9 @@ export async function serverSummaries(userId: number, isOnline: (id: number) => 
       latestWatts: s.latest_watts,
       isEstimated: s.latest_estimated === null ? null : Boolean(s.latest_estimated),
       monthlyKwh: Math.round(monthlyKwh * 100) / 100,
-      monthlyKrw: Math.round(monthlyCostKrw(toPlan(s), monthlyKwh, month)),
+      monthlyKrw: Math.round(
+        monthlyCostKrw(toPlan(s), monthlyKwh, month, Number(s.sample_hours) + Number(s.hourly_hours) + month.remainingHours),
+      ),
     };
   });
 }

@@ -625,3 +625,50 @@ test('activity report keeps servers without recommendations and joins commands t
   assert.equal(body.calls[0].serverName, 'busy');
   assert.equal(body.calls[0].consultationId, consultationId);
 });
+
+test('changing the password ends other sessions and keeps this one', async () => {
+  const { client, email } = await signup(app.base);
+  const other = new Client(app.base);
+  assert.equal((await other.req('POST', '/api/auth/login', { email, password: 'password-123' })).status, 200);
+  assert.equal((await client.req('PATCH', '/api/me', { password: 'new-password-1' })).status, 200);
+  assert.equal((await client.req('GET', '/api/me')).status, 200);
+  assert.equal((await other.req('GET', '/api/me')).status, 401);
+});
+
+test('an email is locked after repeated failed logins, and others are not', async () => {
+  const { email } = await signup(app.base);
+  const bystander = await signup(app.base);
+  const c = new Client(app.base);
+  for (let i = 0; i < 10; i++) {
+    assert.equal((await c.req('POST', '/api/auth/login', { email, password: 'wrong-password' })).status, 401);
+  }
+  const locked = await c.req('POST', '/api/auth/login', { email, password: 'password-123' });
+  assert.equal(locked.status, 429);
+  assert.equal(locked.body.error.code, 'too_many_attempts');
+  assert.equal((await c.req('POST', '/api/auth/login', { email: bystander.email, password: 'password-123' })).status, 200);
+});
+
+test('summary bills a cloud instance only for the hours it reported plus the rest of the month', async () => {
+  const { client } = await signup(app.base);
+  const { server } = await addServer(client, { name: 'vm', kind: 'cloud_vm', ratePlan: 'cloud_hourly', hourlyKrw: 100 });
+  await pool.query('INSERT INTO metrics VALUES (?, ?, 1, 2, 50, 1)', [server.id, new Date()]);
+  const { body } = await client.req('GET', `/api/servers/${server.id}`);
+  const expected = 100 * (1 + kstMonth(new Date()).remainingHours);
+  assert.ok(Math.abs(body.monthlyKrw - expected) <= 1, `${body.monthlyKrw} vs ${expected}`);
+});
+
+test('savings: two changes close together are each measured only across their own hours', async () => {
+  const { client } = await signup(app.base);
+  const { server } = await addServer(client, { ...SERVER, householdKwh: 150 });
+  const t = floorHour(Date.now() - 40 * HOUR);
+  const first = await appliedRecommendation(server.id, 'rule', new Date(t + 60_000));
+  const second = await appliedRecommendation(server.id, 'ai', new Date(t + 2 * HOUR + 60_000));
+  for (let h = t - 23 * HOUR; h <= t + 30 * HOUR; h += HOUR) {
+    const watts = h < t ? 200 : h < t + 2 * HOUR ? 150 : 100;
+    await pool.query('INSERT INTO metrics_hourly VALUES (?, ?, ?, 0.1)', [server.id, new Date(h), watts]);
+  }
+  const { body } = await client.req('GET', `/api/reports/savings?serverId=${server.id}`);
+  const byId = new Map(body.items.map((i: any) => [i.recommendationId, [i.beforeWatts, i.afterWatts]]));
+  assert.deepEqual(byId.get(first), [200, 150]);
+  assert.deepEqual(byId.get(second), [150, 100]);
+});

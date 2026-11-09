@@ -21,6 +21,6 @@ export function broadcast(userId: number, event: object): void {
 
 export const closeAgent = (serverId: number) => agents.get(serverId)?.close(4001, 'server deleted');
 
-export const closeWebClients = (userId: number) => {
-  for (const ws of webClients.get(userId) ?? []) ws.close(4001, 'account deleted');
+export const closeWebClients = (userId: number, reason = 'account deleted') => {
+  for (const ws of webClients.get(userId) ?? []) ws.close(4001, reason);
 };

@@ -37,8 +37,11 @@ export async function verifyPassword(password: string, stored = ''): Promise<boo
   return expected.length === KEY_LENGTH && timingSafeEqual(derived, expected);
 }
 
-export function setSession(res: Response, userId: number): void {
-  const token = jwt.sign({}, config.jwtSecret, {
+/** Ties a session to the password it was opened with, so changing the password ends the others. */
+const passwordStamp = (passwordHash: string) => sha256(passwordHash).slice(0, 16);
+
+export function setSession(res: Response, userId: number, passwordHash: string): void {
+  const token = jwt.sign({ pw: passwordStamp(passwordHash) }, config.jwtSecret, {
     algorithm: 'HS256',
     subject: String(userId),
     expiresIn: SESSION_SECONDS,
@@ -50,13 +53,19 @@ export function clearSession(res: Response): void {
   res.clearCookie(COOKIE, COOKIE_OPTIONS);
 }
 
-/** Resolves the session cookie to a live user. Deleted users fail even with a valid JWT. */
+/** Resolves the session cookie to a live user. Deleted users and old passwords fail even with a valid JWT. */
 export async function userFromCookie(header: string | undefined): Promise<UserRow | undefined> {
   const entry = header?.split(';').map((p) => p.trim()).find((p) => p.startsWith(`${COOKIE}=`));
   if (!entry) return undefined;
   try {
-    const { sub } = jwt.verify(entry.slice(COOKIE.length + 1), config.jwtSecret, { algorithms: ['HS256'] }) as jwt.JwtPayload;
-    return await one<UserRow>('SELECT id, email, name, created_at FROM users WHERE id = ?', [Number(sub)]);
+    const { sub, pw } = jwt.verify(entry.slice(COOKIE.length + 1), config.jwtSecret, { algorithms: ['HS256'] }) as jwt.JwtPayload;
+    const user = await one<UserRow & { password_hash: string }>(
+      'SELECT id, email, name, created_at, password_hash FROM users WHERE id = ?',
+      [Number(sub)],
+    );
+    if (!user || pw !== passwordStamp(user.password_hash)) return undefined;
+    const { password_hash: _, ...rest } = user;
+    return rest;
   } catch (err) {
     if (err instanceof jwt.JsonWebTokenError) return undefined; // includes expiry
     throw err;

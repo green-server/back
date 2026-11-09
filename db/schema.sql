@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   id                BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   consultation_id   BIGINT UNSIGNED NOT NULL,
   recommendation_id BIGINT UNSIGNED NULL,
+  request_id        VARCHAR(255) NULL,                 -- agent's id for the call; NULL on undo rows
   command           TEXT NOT NULL,
   tier              ENUM('auto','approve','deny') NOT NULL,
   decision          ENUM('auto','pending','approved','denied','blocked') NOT NULL,
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   exit_code         INT NULL,
   undo_command      TEXT NULL,
   undo_of           BIGINT UNSIGNED NULL,
+  UNIQUE KEY uq_call_request (consultation_id, request_id),
   CONSTRAINT fk_call_consult FOREIGN KEY (consultation_id) REFERENCES consultations(id) ON DELETE CASCADE,
   CONSTRAINT fk_call_rec     FOREIGN KEY (recommendation_id) REFERENCES recommendations(id) ON DELETE SET NULL,
   CONSTRAINT fk_call_undo    FOREIGN KEY (undo_of) REFERENCES tool_calls(id) ON DELETE SET NULL

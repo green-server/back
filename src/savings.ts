@@ -37,8 +37,10 @@ export async function savingsReport(userId: number, serverId: number | null, now
   // otherwise a fresh action has nothing to measure for a week. Each hour before the action pairs
   // with the same clock hour a day later, which keeps the day/night mix equal on both sides. The
   // hour holding applied_at is on neither side, and only finished hours count. LEFT JOIN: a stopped
-  // server reports nothing, so a missing hour is 0 W.
-  // ponytail: a network outage also reads as 0 W; compare against agent uptime if that skews reports.
+  // server reports nothing, so a missing hour is 0 W. The agent holds samples through a link outage
+  // and sends them on reconnect, so a gap means the agent was not running.
+  // A pair that spans another applied change on the same server belongs to neither: the drop
+  // could be either one's, and crediting both would count it twice.
   const items = await rows<ItemRow>(
     `WITH hourly AS (
        SELECT server_id, hour, avg_watts FROM metrics_hourly WHERE server_id IN (${owned})
@@ -60,6 +62,11 @@ export async function savingsReport(userId: number, serverId: number | null, now
        AND b.hour >= r.applied_hour - INTERVAL 23 HOUR AND b.hour < r.applied_hour
        AND b.hour + INTERVAL 25 HOUR <= ?
      LEFT JOIN hourly a ON a.server_id = b.server_id AND a.hour = b.hour + INTERVAL 24 HOUR
+     WHERE NOT EXISTS (
+       SELECT 1 FROM applied o
+       WHERE o.server_id = r.server_id AND o.id <> r.id
+         AND o.applied_hour >= b.hour AND o.applied_hour <= b.hour + INTERVAL 24 HOUR
+     )
      GROUP BY r.id, r.source, r.type, r.applied_at, s.id
      ORDER BY r.applied_at DESC`,
     [...scope, ...scope, ...scope, now],
