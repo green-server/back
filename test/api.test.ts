@@ -588,7 +588,7 @@ test('savings: a fresh action has no finished after-hour yet, but still counts a
   const { body } = await client.req('GET', '/api/reports/savings');
   assert.deepEqual(body.items, []);
   const ai = body.bySource.find((s: any) => s.source === 'ai');
-  assert.deepEqual(ai, { source: 'ai', total: 1, applied: 1, savedKrwMonth: 0 });
+  assert.deepEqual(ai, { source: 'ai', total: 1, applied: 1, savedKrwMonth: 0, savedCo2KgMonth: 0 });
 });
 
 test('savings report is scoped to the caller and validates serverId', async () => {
