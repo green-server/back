@@ -1,7 +1,7 @@
 // Row shapes and their api.md JSON form.
 import type { UserRow } from './auth.js';
 import { one, rows } from './db.js';
-import { kstMonth, monthlyCostKrw, projectKwh } from './fees.js';
+import { co2Kg, kstMonth, monthlyCostKrw, projectKwh } from './fees.js';
 
 /** The agent reports every 10 seconds, so each sample stands for 10 seconds of energy. */
 export const METRIC_INTERVAL_SEC = 10;
@@ -94,6 +94,7 @@ export async function serverSummaries(userId: number, isOnline: (id: number) => 
       weekWatts: s.week_watts === null ? null : Math.round(s.week_watts * 100) / 100,
       isEstimated: s.latest_estimated === null ? null : Boolean(s.latest_estimated),
       monthlyKwh: Math.round(monthlyKwh * 100) / 100,
+      monthlyCo2Kg: co2Kg(monthlyKwh),
       monthlyKrw: Math.round(
         monthlyCostKrw(toPlan(s), monthlyKwh, month, Number(s.sample_hours) + Number(s.hourly_hours) + month.remainingHours),
       ),

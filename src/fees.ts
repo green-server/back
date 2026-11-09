@@ -8,6 +8,10 @@ const TIER_LIMITS_KWH = [200, 400] as const;
 const SUMMER_TIER_LIMITS_KWH = [300, 450] as const;
 const SUMMER_MONTHS = [7, 8];
 
+// Korea's national grid emission factor (온실가스 배출권거래제 국가 전력배출계수), kg CO₂ per kWh.
+export const CO2_KG_PER_KWH = 0.4594;
+export const co2Kg = (kwh: number) => Math.round(kwh * CO2_KG_PER_KWH * 100) / 100;
+
 const KST_OFFSET_MS = 9 * 3_600_000;
 const HOUR_MS = 3_600_000;
 

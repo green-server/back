@@ -1,5 +1,5 @@
 import { rows } from './db.js';
-import { kstMonth, monthlyCostKrw, savingKrw, type KstMonth, type RatePlan } from './fees.js';
+import { co2Kg, kstMonth, monthlyCostKrw, savingKrw, type KstMonth, type RatePlan } from './fees.js';
 import { iso, toPlan, type ServerRow } from './models.js';
 
 type ItemRow = Pick<ServerRow, 'rate_plan' | 'hourly_krw' | 'household_kwh'> & {
@@ -83,6 +83,7 @@ export async function savingsReport(userId: number, serverId: number | null, now
       beforeWatts: round2(i.before_watts),
       afterWatts: round2(i.after_watts),
       savedKwhMonth: round2((savedWatts * month.hours) / 1000),
+      savedCo2KgMonth: co2Kg((savedWatts * month.hours) / 1000),
       savedKrwMonth: Math.round(savedKrwMonth(toPlan(i), i.before_watts, i.after_watts, i.stopped_share, month)),
     };
   });
@@ -103,6 +104,11 @@ export async function savingsReport(userId: number, serverId: number | null, now
       total: s.total,
       applied: Number(s.applied),
       savedKrwMonth: reported.filter((i) => i.source === s.source).reduce((sum, i) => sum + i.savedKrwMonth, 0),
+      savedCo2KgMonth: round2(reported.filter((i) => i.source === s.source).reduce((sum, i) => sum + i.savedCo2KgMonth, 0)),
     })),
+    total: {
+      savedKrwMonth: reported.reduce((sum, i) => sum + i.savedKrwMonth, 0),
+      savedCo2KgMonth: round2(reported.reduce((sum, i) => sum + i.savedCo2KgMonth, 0)),
+    },
   };
 }

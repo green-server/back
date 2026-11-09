@@ -283,6 +283,7 @@ test('summary projects month-to-date from metrics and metrics_hourly without dou
   const toDate = 5 + (100 * 30 * 10) / 3_600_000;
   const expected = toDate + (month.remainingHours * 100) / 1000;
   assert.ok(Math.abs(body.monthlyKwh - expected) < 0.05, `${body.monthlyKwh} vs ${expected}`);
+  assert.equal(body.monthlyCo2Kg, Math.round(body.monthlyKwh * 0.4594 * 100) / 100);
   assert.equal(body.latestWatts, 100);
   assert.equal(body.weekWatts, 100);
   assert.equal(body.isEstimated, true);
@@ -554,10 +555,12 @@ test('savings: before hours from metrics_hourly pair with after hours still in r
   assert.equal(item.savedKwhMonth, Math.round(((90 * month.hours) / 1000) * 100) / 100);
   const plan = { ratePlan: 'home_tiered', hourlyKrw: null, householdKwh: 150 } as const;
   assert.equal(item.savedKrwMonth, Math.round(savingKrw(plan, 200, 90, month)));
+  assert.equal(item.savedCo2KgMonth, Math.round(item.savedKwhMonth * 0.4594 * 100) / 100);
+  assert.equal(body.total.savedKrwMonth, body.items.reduce((s: number, i: any) => s + i.savedKrwMonth, 0));
 
   assert.deepEqual(body.bySource.toSorted((a: any, b: any) => a.source.localeCompare(b.source)), [
-    { source: 'ai', total: 1, applied: 1, savedKrwMonth: item.savedKrwMonth },
-    { source: 'rule', total: 1, applied: 0, savedKrwMonth: 0 },
+    { source: 'ai', total: 1, applied: 1, savedKrwMonth: item.savedKrwMonth, savedCo2KgMonth: item.savedCo2KgMonth },
+    { source: 'rule', total: 1, applied: 0, savedKrwMonth: 0, savedCo2KgMonth: 0 },
   ]);
 });
 
