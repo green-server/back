@@ -1,12 +1,13 @@
 // Handles messages from a connected agent. Each one is untrusted input bound to ctx.serverId.
 import { one, rows, run, tx } from './db.js';
+import { locate } from './geo.js';
 import { broadcast } from './hub.js';
 import { isNumber, isObject, isText } from './http.js';
 import { getConsultation, getToolCall, type ToolCallRow } from './models.js';
 import { pushStream, type StreamEntry } from './stream.js';
 import { forget, ingestDecision, isTracked, settle, track } from './toolCalls.js';
 
-export type AgentContext = { serverId: number; userId: number };
+export type AgentContext = { serverId: number; userId: number; ip?: string | null };
 type Message = Record<string, unknown>;
 
 const MAX_PROCESSES = 200;
@@ -250,6 +251,22 @@ async function onConsultationStream(ctx: AgentContext, m: Message): Promise<void
   broadcast(ctx.userId, { type: 'consultation_stream', consultationId, entry });
 }
 
+// One lookup per server and address for the life of the process; a failure leaves the old place.
+const placed = new Map<number, string>();
+async function place(ctx: AgentContext): Promise<void> {
+  if (!ctx.ip || placed.get(ctx.serverId) === ctx.ip) return;
+  placed.set(ctx.serverId, ctx.ip);
+  try {
+    const found = await locate(ctx.ip);
+    if (found) {
+      await run('UPDATE servers SET latitude = ?, longitude = ?, location = ? WHERE id = ?', [found.lat, found.lon, found.label, ctx.serverId]);
+    }
+  } catch (err) {
+    placed.delete(ctx.serverId);
+    console.error(`locate server ${ctx.serverId}:`, err instanceof Error ? err.message : err);
+  }
+}
+
 export async function handleAgentMessage(ctx: AgentContext, raw: string): Promise<void> {
   let m: unknown;
   try {
@@ -262,6 +279,7 @@ export async function handleAgentMessage(ctx: AgentContext, raw: string): Promis
     case 'hello':
       if (isText(m.agentVersion, 64) && isText(m.hostname, 255) && isText(m.os, 64)) {
         await run('UPDATE servers SET last_seen_at = NOW() WHERE id = ?', [ctx.serverId]);
+        void place(ctx);
       }
       return;
     case 'metrics':

@@ -5,6 +5,7 @@ import { handleAgentMessage, type AgentContext } from './agent.js';
 import { sha256, userFromCookie } from './auth.js';
 import { config } from './config.js';
 import { one } from './db.js';
+import { clientIp } from './geo.js';
 import { agents, broadcast, webClients } from './hub.js';
 
 const HEARTBEAT_MS = 30_000;
@@ -62,7 +63,7 @@ export function attachWebSockets(server: Server): void {
         ? await one<{ id: number; user_id: number }>('SELECT id, user_id FROM servers WHERE agent_token_hash = ?', [sha256(token)])
         : undefined;
       if (!row) return reject(socket, 401);
-      agentWss.handleUpgrade(req, socket, head, (ws) => acceptAgent(ws, { serverId: row.id, userId: row.user_id }));
+      agentWss.handleUpgrade(req, socket, head, (ws) => acceptAgent(ws, { serverId: row.id, userId: row.user_id, ip: clientIp(req) }));
     } else if (pathname === '/ws/web') {
       if (req.headers.origin !== config.frontOrigin) return reject(socket, 403);
       const user = await userFromCookie(req.headers.cookie);

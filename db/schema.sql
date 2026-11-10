@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS servers (
   household_kwh    INT UNSIGNED NOT NULL DEFAULT 0,    -- home_tiered: monthly use excluding this server
   agent_token_hash CHAR(64) NOT NULL UNIQUE,           -- sha256 hex
   last_seen_at     DATETIME NULL,
+  latitude         DECIMAL(8,5) NULL,                 -- guessed from the agent's public IP
+  longitude        DECIMAL(8,5) NULL,
+  location         VARCHAR(120) NULL,                 -- "City, CC"
   created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_servers_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );

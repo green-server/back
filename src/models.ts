@@ -21,6 +21,9 @@ export type ServerRow = {
   hourly_krw: number | null;
   household_kwh: number;
   last_seen_at: Date | null;
+  latitude: number | null;
+  longitude: number | null;
+  location: string | null;
   created_at: Date;
 };
 
@@ -33,6 +36,8 @@ export const toServer = (s: ServerRow) => ({
   householdKwh: s.household_kwh,
   powerSource: s.power_source,
   lastSeenAt: iso(s.last_seen_at),
+  location:
+    s.latitude === null || s.longitude === null ? null : { lat: s.latitude, lon: s.longitude, label: s.location ?? '' },
   createdAt: iso(s.created_at),
 });
 
