@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { homeBillKrw, kstMonth, marginalHomeCostKrw, monthlyCostKrw, projectKwh, savingKrw } from '../src/fees.js';
 
-const near = (actual: number, expected: number) => assert.ok(Math.abs(actual - expected) < 1e-6, `${actual} != ${expected}`);
+const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-6, `${actual} != ${expected}`);
 
 test('non-summer tiers: base follows the top tier, energy is progressive', () => {
   near(homeBillKrw(0, 3), 910);
@@ -54,7 +54,7 @@ test('projection adds remaining hours at the recent draw', () => {
 
 test('saving is the cost difference, and zero without a baseline', () => {
   const m = kstMonth(new Date('2026-11-06T00:00:00Z'));
-  const home = { ratePlan: 'home_tiered', hourlyKrw: null, householdKwh: 150 } as const;
+  const home = { ratePlan: 'home_tiered', hourlyKrw: null, householdKwh: 150 };
   near(savingKrw(home, 100, 100, m), marginalHomeCostKrw(150, 72, m.month));
   near(savingKrw({ ratePlan: 'cloud_hourly', hourlyKrw: 100, householdKwh: 0 }, 100, 25, m), 100 * 720 * 0.25);
   assert.equal(savingKrw(home, 0, 0, m), 0);

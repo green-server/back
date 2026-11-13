@@ -4,17 +4,15 @@
 const MAX_ENTRIES = 500;
 const MAX_CONSULTATIONS = 20;
 
-export type StreamEntry = { seq: number; kind: 'text' | 'command' | 'output'; text: string };
-
-const streams = new Map<number, StreamEntry[]>();
+const streams = new Map();
 let lastSeq = 0;
 
-export function pushStream(consultationId: number, kind: StreamEntry['kind'], text: string): StreamEntry {
+export function pushStream(consultationId, kind, text) {
   let entries = streams.get(consultationId);
   if (!entries) {
     entries = [];
     streams.set(consultationId, entries);
-    if (streams.size > MAX_CONSULTATIONS) streams.delete(streams.keys().next().value!);
+    if (streams.size > MAX_CONSULTATIONS) streams.delete(streams.keys().next().value);
   }
   const entry = { seq: ++lastSeq, kind, text };
   entries.push(entry);
@@ -22,4 +20,4 @@ export function pushStream(consultationId: number, kind: StreamEntry['kind'], te
   return entry;
 }
 
-export const streamOf = (consultationId: number) => streams.get(consultationId) ?? [];
+export const streamOf = (consultationId) => streams.get(consultationId) ?? [];

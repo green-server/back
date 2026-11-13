@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { Router, type Request, type Response } from 'express';
-import { clearSession, hashPassword, requireAuth, setSession, sha256, verifyPassword, type UserRow } from './auth.js';
+import { Router } from 'express';
+import { clearSession, hashPassword, isLegacyHash, requireAuth, setSession, sha256, verifyPassword } from './auth.js';
 import { one, rows, run } from './db.js';
 import { agentOffline, ApiError, invalid, isNumber, isObject, isText, notFound, parseId } from './http.js';
 import { broadcast, closeAgent, closeWebClients, isOnline, sendToAgent } from './hub.js';
@@ -14,10 +14,6 @@ import {
   toServer,
   toToolCall,
   toUser,
-  type ConsultationRow,
-  type RecommendationRow,
-  type ServerRow,
-  type ToolCallRow,
 } from './models.js';
 import { grantPublicKey } from './grants.js';
 import { savingsReport } from './savings.js';
@@ -44,50 +40,50 @@ const MAX_TRACKED_EMAILS = 10_000;
 // Failed logins per email, so one account cannot be guessed at. Keyed by email, not IP: behind the
 // proxy every request shares one address.
 // ponytail: in-process and cleared wholesale at the cap; a shared store if the backend scales out.
-const loginFailures = new Map<string, { count: number; since: number }>();
+const loginFailures = new Map();
 
-function loginLocked(email: string): boolean {
+function loginLocked(email) {
   const f = loginFailures.get(email);
   if (f && Date.now() - f.since > LOGIN_WINDOW_MS) loginFailures.delete(email);
   return (loginFailures.get(email)?.count ?? 0) >= MAX_LOGIN_FAILURES;
 }
 
-function recordLoginFailure(email: string): void {
+function recordLoginFailure(email) {
   if (loginFailures.size >= MAX_TRACKED_EMAILS) loginFailures.clear();
   const f = loginFailures.get(email) ?? { count: 0, since: Date.now() };
   loginFailures.set(email, { ...f, count: f.count + 1 });
 }
 
 /** [window seconds, bucket seconds]. 7 days of 10-second samples would be 60,000 rows per chart. */
-const METRIC_RANGES: Record<string, [number, number]> = {
+const METRIC_RANGES = {
   '1h': [3600, 10],
   '24h': [86_400, 60],
   '7d': [604_800, 600],
 };
 
-function body(req: Request): Record<string, unknown> {
+function body(req) {
   if (!isObject(req.body)) throw invalid('요청 본문이 올바르지 않습니다.');
   return req.body;
 }
 
-const isPassword = (v: unknown): v is string =>
+const isPassword = (v) =>
   typeof v === 'string' && v.length >= MIN_PASSWORD && v.length <= MAX_PASSWORD;
 
-function pathId(req: Request): number {
+function pathId(req) {
   const id = parseId(req.params.id);
   if (id === null) throw notFound();
   return id;
 }
 
-async function ownedServer(req: Request): Promise<ServerRow> {
-  const server = await one<ServerRow>('SELECT * FROM servers WHERE id = ? AND user_id = ?', [pathId(req), req.user.id]);
+async function ownedServer(req) {
+  const server = await one('SELECT * FROM servers WHERE id = ? AND user_id = ?', [pathId(req), req.user.id]);
   if (!server) throw notFound();
   return server;
 }
 
 /** Validates a full input, or a partial one merged over the stored row. */
-function serverColumns(input: Record<string, unknown>, current?: ServerRow): unknown[] {
-  const field = (key: string, fallback: unknown) => (input[key] === undefined ? fallback : input[key]);
+function serverColumns(input, current) {
+  const field = (key, fallback) => (input[key] === undefined ? fallback : input[key]);
   const name = field('name', current?.name);
   const kind = field('kind', current?.kind);
   const ratePlan = field('ratePlan', current?.rate_plan);
@@ -120,10 +116,10 @@ api.post('/auth/signup', async (req, res) => {
       hash,
     ]);
     setSession(res, insertId, hash);
-    const user = await one<UserRow>('SELECT id, email, name, created_at FROM users WHERE id = ?', [insertId]);
-    res.status(201).json(toUser(user!));
+    const user = await one('SELECT id, email, name, created_at FROM users WHERE id = ?', [insertId]);
+    res.status(201).json(toUser(user));
   } catch (err) {
-    if ((err as { code?: string }).code === 'ER_DUP_ENTRY') {
+    if (err.code === 'ER_DUP_ENTRY') {
       throw new ApiError(409, 'email_taken', '이미 가입된 이메일입니다.');
     }
     throw err;
@@ -137,13 +133,24 @@ api.post('/auth/login', async (req, res) => {
   }
   const key = email.trim().toLowerCase();
   if (loginLocked(key)) throw new ApiError(429, 'too_many_attempts', '로그인 시도가 너무 많습니다. 15분 뒤에 다시 시도하세요.');
-  const user = await one<UserRow & { password_hash: string }>('SELECT * FROM users WHERE email = ?', [key]);
+  const user = await one('SELECT * FROM users WHERE email = ?', [key]);
   if (!(await verifyPassword(password, user?.password_hash)) || !user) {
     recordLoginFailure(key);
     throw new ApiError(401, 'invalid_credentials', '이메일 또는 비밀번호가 올바르지 않습니다.');
   }
   loginFailures.delete(key);
-  setSession(res, user.id, user.password_hash);
+  let passwordHash = user.password_hash;
+  if (isLegacyHash(passwordHash)) {
+    // Moves a legacy scrypt hash to bcrypt. Matching the old hash keeps a password changed meanwhile.
+    const upgraded = await hashPassword(password);
+    const { affectedRows } = await run('UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?', [
+      upgraded,
+      user.id,
+      passwordHash,
+    ]);
+    if (affectedRows) passwordHash = upgraded;
+  }
+  setSession(res, user.id, passwordHash);
   res.json(toUser(user));
 });
 
@@ -179,7 +186,7 @@ api.patch('/me', async (req, res) => {
 });
 
 api.delete('/me', async (req, res) => {
-  const servers = await rows<{ id: number }>('SELECT id FROM servers WHERE user_id = ?', [req.user.id]);
+  const servers = await rows('SELECT id FROM servers WHERE user_id = ?', [req.user.id]);
   await run('DELETE FROM users WHERE id = ?', [req.user.id]);
   for (const { id } of servers) closeAgent(id);
   closeWebClients(req.user.id);
@@ -199,8 +206,8 @@ api.post('/servers', async (req, res) => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [...columns, req.user.id, sha256(agentToken)],
   );
-  const server = await one<ServerRow>('SELECT * FROM servers WHERE id = ?', [insertId]);
-  res.status(201).json({ server: toServer(server!), agentToken });
+  const server = await one('SELECT * FROM servers WHERE id = ?', [insertId]);
+  res.status(201).json({ server: toServer(server), agentToken });
 });
 
 api.get('/servers/:id', async (req, res) => {
@@ -232,7 +239,7 @@ api.get('/servers/:id/metrics', async (req, res) => {
   const range = METRIC_RANGES[String(req.query.range ?? '1h')];
   if (!range) throw invalid('range는 1h, 24h, 7d 중 하나여야 합니다.');
   const [windowSec, bucketSec] = range;
-  const found = await rows<{ ts: Date; cpu_pct: number; mem_pct: number; watts: number; is_estimated: number }>(
+  const found = await rows(
     `SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(ts) / ?) * ?) AS ts, ROUND(AVG(cpu_pct), 2) AS cpu_pct,
             ROUND(AVG(mem_pct), 2) AS mem_pct, ROUND(AVG(watts), 2) AS watts, MAX(is_estimated) AS is_estimated
      FROM metrics WHERE server_id = ? AND metrics.ts >= ? GROUP BY 1 ORDER BY 1`,
@@ -245,7 +252,7 @@ api.get('/servers/:id/metrics', async (req, res) => {
 
 api.get('/servers/:id/processes', async (req, res) => {
   const { id } = await ownedServer(req);
-  const found = await rows<{ ts: Date; pid: number; name: string; cpu_pct: number; watts: number }>(
+  const found = await rows(
     `SELECT p.ts, p.pid, p.name, p.cpu_pct, p.watts
      FROM process_samples p
      JOIN servers s ON s.id = p.server_id
@@ -258,19 +265,19 @@ api.get('/servers/:id/processes', async (req, res) => {
 
 api.get('/servers/:id/recommendations', async (req, res) => {
   const { id } = await ownedServer(req);
-  const found = await rows<RecommendationRow>('SELECT * FROM recommendations WHERE server_id = ? ORDER BY id DESC', [id]);
+  const found = await rows('SELECT * FROM recommendations WHERE server_id = ? ORDER BY id DESC', [id]);
   res.json(found.map(toRecommendation));
 });
 
 const RECOMMENDATION_SELECT = `SELECT r.* FROM recommendations r JOIN servers s ON s.id = r.server_id WHERE r.id = ? AND s.user_id = ?`;
 
-async function ownedRecommendation(req: Request) {
-  const found = await one<RecommendationRow>(RECOMMENDATION_SELECT, [pathId(req), req.user.id]);
+async function ownedRecommendation(req) {
+  const found = await one(RECOMMENDATION_SELECT, [pathId(req), req.user.id]);
   if (!found) throw notFound();
   return found;
 }
 
-async function closeRecommendation(req: Request, res: Response, assignment: string) {
+async function closeRecommendation(req, res, assignment) {
   const found = await ownedRecommendation(req);
   if (found.status !== 'open') throw new ApiError(409, 'not_open', '열려 있는 추천이 아닙니다.');
   await run(`UPDATE recommendations SET ${assignment} WHERE id = ? AND status = 'open'`, [found.id]);
@@ -286,7 +293,7 @@ api.post('/recommendations/:id/unapply', async (req, res) => {
   const found = await ownedRecommendation(req);
   if (found.status !== 'applied') throw new ApiError(409, 'not_applied', '적용된 추천이 아닙니다.');
   // Commands really ran for these: clearing the mark would hide a change that is still on the server.
-  const calls = await rows<{ id: number }>('SELECT id FROM tool_calls WHERE recommendation_id = ? LIMIT 1', [found.id]);
+  const calls = await rows('SELECT id FROM tool_calls WHERE recommendation_id = ? LIMIT 1', [found.id]);
   if (calls.length > 0) throw new ApiError(409, 'has_tool_calls', '실행 기록이 있는 조치입니다. 컨설팅 화면에서 되돌려 주세요.');
   await run("UPDATE recommendations SET status = 'open', applied_at = NULL WHERE id = ? AND status = 'applied'", [found.id]);
   res.json(toRecommendation(await ownedRecommendation(req)));
@@ -294,13 +301,11 @@ api.post('/recommendations/:id/unapply', async (req, res) => {
 
 api.get('/servers/:id/consultations', async (req, res) => {
   const { id } = await ownedServer(req);
-  const found = await rows<ConsultationRow>('SELECT * FROM consultations WHERE server_id = ? ORDER BY id DESC', [id]);
+  const found = await rows('SELECT * FROM consultations WHERE server_id = ? ORDER BY id DESC', [id]);
   res.json(found.map(toConsultation));
 });
 
-type Task = { task: string } & ({ recommendationId: number } | { readOnly: true });
-
-async function startConsultation(userId: number, serverId: number, authMode: string, model: string, task?: Task) {
+async function startConsultation(userId, serverId, authMode, model, task) {
   if (!isOnline(serverId)) throw agentOffline();
   const { insertId } = await run('INSERT INTO consultations (server_id, auth_mode, model) VALUES (?, ?, ?)', [serverId, authMode, model]);
   if (!sendToAgent(serverId, { type: 'consultation_start', consultationId: insertId, authMode, model, maxTurns: MAX_TURNS, ...task })) {
@@ -322,9 +327,9 @@ api.post('/servers/:id/consultations', async (req, res) => {
 
 // Runs the recommendation on the server. It uses the settings of the last consultation,
 // because that auth mode is the one known to work there.
-async function openRecommendationSettings(found: { status: string; server_id: number }) {
+async function openRecommendationSettings(found) {
   if (found.status !== 'open') throw new ApiError(409, 'not_open', '열려 있는 추천이 아닙니다.');
-  const last = await one<Pick<ConsultationRow, 'auth_mode' | 'model'>>(
+  const last = await one(
     'SELECT auth_mode, model FROM consultations WHERE server_id = ? ORDER BY id DESC LIMIT 1',
     [found.server_id],
   );
@@ -332,12 +337,12 @@ async function openRecommendationSettings(found: { status: string; server_id: nu
 }
 
 // What the owner read and agreed to is what runs.
-async function planSteps(planConsultationId: unknown, serverId: number) {
+async function planSteps(planConsultationId, serverId) {
   if (planConsultationId === undefined) return '';
   const id = parseId(String(planConsultationId));
-  const plan = id === null ? undefined : await one<ConsultationRow>("SELECT * FROM consultations WHERE id = ? AND server_id = ? AND status = 'done'", [id, serverId]);
+  const plan = id === null ? undefined : await one("SELECT * FROM consultations WHERE id = ? AND server_id = ? AND status = 'done'", [id, serverId]);
   if (!plan) throw invalid('계획을 찾을 수 없습니다.');
-  const steps = toConsultation(plan).fixes.map((step: string, i: number) => `${i + 1}. ${step}`).join('\n');
+  const steps = toConsultation(plan).fixes.map((step, i) => `${i + 1}. ${step}`).join('\n');
   return steps && `\n\n서버 주인이 확인한 계획입니다. 이 순서를 따르세요.\n${steps}`;
 }
 
@@ -352,17 +357,17 @@ api.post('/recommendations/:id/execute', async (req, res) => {
 api.post('/recommendations/:id/plan', async (req, res) => {
   const found = await ownedRecommendation(req);
   const last = await openRecommendationSettings(found);
-  const task = { readOnly: true as const, task: found.detail };
+  const task = { readOnly: true, task: found.detail };
   res.status(201).json(await startConsultation(req.user.id, found.server_id, last?.auth_mode ?? 'subscription', last?.model ?? DEFAULT_MODEL, task));
 });
 
 api.get('/consultations/:id', async (req, res) => {
-  const consultation = await one<ConsultationRow>(
+  const consultation = await one(
     'SELECT c.* FROM consultations c JOIN servers s ON s.id = c.server_id WHERE c.id = ? AND s.user_id = ?',
     [pathId(req), req.user.id],
   );
   if (!consultation) throw notFound();
-  const calls = await rows<ToolCallRow>('SELECT * FROM tool_calls WHERE consultation_id = ? ORDER BY id', [consultation.id]);
+  const calls = await rows('SELECT * FROM tool_calls WHERE consultation_id = ? ORDER BY id', [consultation.id]);
   res.json({ ...toConsultation(consultation), toolCalls: calls.map(toToolCall), stream: streamOf(consultation.id) });
 });
 
@@ -381,7 +386,7 @@ const ACTIVITY_LIMIT = 60;
 
 api.get('/reports/activity', async (req, res) => {
   // LEFT JOIN: a server nothing was recommended for still belongs in the table, with zeros.
-  const servers = await rows<{ id: number; name: string; total: number; open: string | null; applied: string | null; open_saving: string | null }>(
+  const servers = await rows(
     `SELECT s.id, s.name, COUNT(r.id) AS total,
             SUM(r.status = 'open') AS open, SUM(r.status = 'applied') AS applied,
             SUM(CASE WHEN r.status = 'open' THEN r.est_saving_krw END) AS open_saving
@@ -393,7 +398,7 @@ api.get('/reports/activity', async (req, res) => {
     [req.user.id],
   );
   // INNER JOIN: a command only exists inside a consultation on a server, so the chain always matches.
-  const calls = await rows<{ id: number; command: string; tier: ToolCallRow['tier']; decision: ToolCallRow['decision']; exit_code: number | null; consultation_id: number; requested_at: Date; server_name: string }>(
+  const calls = await rows(
     `SELECT t.id, t.command, t.tier, t.decision, t.exit_code, c.id AS consultation_id, c.requested_at, s.name AS server_name
      FROM tool_calls t
      INNER JOIN consultations c ON c.id = t.consultation_id
@@ -426,7 +431,7 @@ api.get('/reports/activity', async (req, res) => {
 });
 
 api.get('/reports/savings', async (req, res) => {
-  let serverId: number | null = null;
+  let serverId = null;
   if (req.query.serverId !== undefined) {
     serverId = parseId(req.query.serverId);
     if (serverId === null) throw invalid('serverId가 올바르지 않습니다.');

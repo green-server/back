@@ -1,34 +1,17 @@
 import { rows } from './db.js';
-import { co2Kg, kstMonth, monthlyCostKrw, savingKrw, type KstMonth, type RatePlan } from './fees.js';
-import { iso, toPlan, type ServerRow } from './models.js';
+import { co2Kg, kstMonth, monthlyCostKrw, savingKrw } from './fees.js';
+import { iso, toPlan } from './models.js';
 
-type ItemRow = Pick<ServerRow, 'rate_plan' | 'hourly_krw' | 'household_kwh'> & {
-  recommendation_id: number;
-  server_name: string;
-  source: 'rule' | 'ai';
-  type: string;
-  applied_at: Date;
-  before_watts: number;
-  after_watts: number;
-  stopped_share: number;
-};
-
-const round2 = (n: number) => Math.round(n * 100) / 100;
+const round2 = (n) => Math.round(n * 100) / 100;
 
 /** A stopped cloud instance saves its hourly fee; a lower draw on a running one saves nothing. */
-export function savedKrwMonth(
-  plan: RatePlan,
-  beforeWatts: number,
-  afterWatts: number,
-  stoppedShare: number,
-  month: KstMonth,
-): number {
+export function savedKrwMonth(plan, beforeWatts, afterWatts, stoppedShare, month) {
   return plan.ratePlan === 'cloud_hourly'
     ? monthlyCostKrw(plan, 0, month) * stoppedShare
     : savingKrw(plan, beforeWatts, beforeWatts - afterWatts, month);
 }
 
-export async function savingsReport(userId: number, serverId: number | null, now = new Date()) {
+export async function savingsReport(userId, serverId, now = new Date()) {
   const month = kstMonth(now);
   const owned = 'SELECT id FROM servers WHERE user_id = ? AND (? IS NULL OR id = ?)';
   const scope = [userId, serverId, serverId];
@@ -41,7 +24,7 @@ export async function savingsReport(userId: number, serverId: number | null, now
   // and sends them on reconnect, so a gap means the agent was not running.
   // A pair that spans another applied change on the same server belongs to neither: the drop
   // could be either one's, and crediting both would count it twice.
-  const items = await rows<ItemRow>(
+  const items = await rows(
     `WITH hourly AS (
        SELECT server_id, hour, avg_watts FROM metrics_hourly WHERE server_id IN (${owned})
        UNION ALL
@@ -79,7 +62,7 @@ export async function savingsReport(userId: number, serverId: number | null, now
       serverName: i.server_name,
       source: i.source,
       type: i.type,
-      appliedAt: iso(i.applied_at)!,
+      appliedAt: iso(i.applied_at),
       beforeWatts: round2(i.before_watts),
       afterWatts: round2(i.after_watts),
       savedKwhMonth: round2((savedWatts * month.hours) / 1000),
@@ -88,7 +71,7 @@ export async function savingsReport(userId: number, serverId: number | null, now
     };
   });
 
-  const sources = await rows<{ source: 'rule' | 'ai'; total: number; applied: number }>(
+  const sources = await rows(
     `SELECT src.source, COUNT(r.id) AS total, COALESCE(SUM(r.status = 'applied'), 0) AS applied
      FROM (SELECT 'rule' AS source UNION ALL SELECT 'ai') AS src
      LEFT JOIN recommendations r ON r.source = src.source COLLATE utf8mb4_0900_ai_ci

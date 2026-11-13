@@ -1,18 +1,14 @@
 // The approval state machine. The guards are pure; decide() and undo() apply them under a row lock.
-import type { PoolConnection } from 'mysql2/promise';
 import { one, rows, run, tx } from './db.js';
 import { grantFor } from './grants.js';
 import { broadcast, isOnline, sendToAgent } from './hub.js';
 import { agentOffline, ApiError, notFound } from './http.js';
-import { getToolCall, type ToolCallRow } from './models.js';
+import { getToolCall } from './models.js';
 
 /** api.md: the agent treats an undecided call as denied after this long. */
 const APPROVAL_TIMEOUT_MS = 10 * 60_000;
 
-export type Decision = 'approved' | 'denied';
-type Guard = { code: string; message: string } | null;
-
-export function decisionGuard(call: Pick<ToolCallRow, 'tier' | 'decision'>, next: Decision): Guard {
+export function decisionGuard(call, next) {
   if (call.tier === 'deny' && next === 'approved') {
     return { code: 'tier_denied', message: '항상 금지된 명령은 승인할 수 없습니다.' };
   }
@@ -20,10 +16,7 @@ export function decisionGuard(call: Pick<ToolCallRow, 'tier' | 'decision'>, next
   return null;
 }
 
-export function undoGuard(
-  call: Pick<ToolCallRow, 'decision' | 'exit_code' | 'undo_command' | 'undo_of'>,
-  undos: Pick<ToolCallRow, 'exit_code'>[],
-): Guard {
+export function undoGuard(call, undos) {
   const ran = call.decision === 'auto' || call.decision === 'approved';
   if (!call.undo_command || call.undo_of !== null || !ran || call.exit_code !== 0) {
     return { code: 'not_undoable', message: '되돌릴 수 없는 호출입니다.' };
@@ -36,32 +29,20 @@ export function undoGuard(
 }
 
 /** Contract pairs pass through. Anything else, and every deny, is recorded as blocked. */
-export function ingestDecision(
-  tier: ToolCallRow['tier'],
-  decision: 'auto' | 'pending' | 'blocked',
-): ToolCallRow['decision'] {
+export function ingestDecision(tier, decision) {
   if (decision === 'blocked') return 'blocked';
   // Consultations run in auto mode: an approve-tier call arrives as already running.
   const known = tier === 'approve' || (tier === 'auto' && decision === 'auto');
   return known ? decision : 'blocked';
 }
 
-type Tracked = {
-  serverId: number;
-  userId: number;
-  requestId: string;
-  toolCallId: number;
-  consultationId: number;
-  timer?: NodeJS.Timeout;
-};
-
 // Live calls by request id. tool_calls.request_id keeps the link across a restart; this adds the timer.
-const tracked = new Map<string, Tracked>();
-const key = (serverId: number, requestId: string) => `${serverId}:${requestId}`;
+const tracked = new Map();
+const key = (serverId, requestId) => `${serverId}:${requestId}`;
 
-export const isTracked = (serverId: number, requestId: string) => tracked.has(key(serverId, requestId));
+export const isTracked = (serverId, requestId) => tracked.has(key(serverId, requestId));
 
-export function track(entry: Tracked, pending: boolean): void {
+export function track(entry, pending) {
   if (pending) {
     entry.timer = setTimeout(() => expire(entry).catch(console.error), APPROVAL_TIMEOUT_MS);
     entry.timer.unref();
@@ -70,7 +51,7 @@ export function track(entry: Tracked, pending: boolean): void {
 }
 
 /** Resolves a tool_result to its call and stops tracking it. */
-export function settle(serverId: number, requestId: string): Tracked | undefined {
+export function settle(serverId, requestId) {
   const k = key(serverId, requestId);
   const entry = tracked.get(k);
   if (entry) clearTimeout(entry.timer);
@@ -79,13 +60,13 @@ export function settle(serverId: number, requestId: string): Tracked | undefined
 }
 
 /** Drops entries of a finished consultation. Calls still awaiting approval keep their timeout. */
-export function forget(consultationId: number): void {
+export function forget(consultationId) {
   for (const [k, entry] of tracked) {
     if (entry.consultationId === consultationId && !entry.timer) tracked.delete(k);
   }
 }
 
-async function expire(entry: Tracked): Promise<void> {
+async function expire(entry) {
   settle(entry.serverId, entry.requestId);
   const { affectedRows } = await run("UPDATE tool_calls SET decision = 'denied' WHERE id = ? AND decision = 'pending'", [entry.toolCallId]);
   if (affectedRows) broadcast(entry.userId, { type: 'tool_call', toolCall: await getToolCall(entry.toolCallId) });
@@ -94,8 +75,8 @@ async function expire(entry: Tracked): Promise<void> {
 /** After a restart nothing can relay these decisions, and the agent has already given up or will. */
 export const denyStalePending = () => run("UPDATE tool_calls SET decision = 'denied' WHERE decision = 'pending'");
 
-function lockOwned(c: PoolConnection, userId: number, id: number) {
-  return one<ToolCallRow & { server_id: number }>(
+function lockOwned(c, userId, id) {
+  return one(
     `SELECT t.*, c.server_id FROM tool_calls t
      JOIN consultations c ON c.id = t.consultation_id
      JOIN servers s ON s.id = c.server_id
@@ -105,9 +86,9 @@ function lockOwned(c: PoolConnection, userId: number, id: number) {
   );
 }
 
-const conflict = (guard: NonNullable<Guard>) => new ApiError(409, guard.code, guard.message);
+const conflict = (guard) => new ApiError(409, guard.code, guard.message);
 
-export async function decide(userId: number, id: number, decision: Decision) {
+export async function decide(userId, id, decision) {
   const { entry, command } = await tx(async (c) => {
     const call = await lockOwned(c, userId, id);
     if (!call) throw notFound();
@@ -136,11 +117,11 @@ export async function decide(userId: number, id: number, decision: Decision) {
   return toolCall;
 }
 
-export async function undo(userId: number, id: number) {
+export async function undo(userId, id) {
   const { serverId, undoId, command } = await tx(async (c) => {
     const call = await lockOwned(c, userId, id);
     if (!call) throw notFound();
-    const undos = await rows<ToolCallRow>('SELECT exit_code FROM tool_calls WHERE undo_of = ?', [id], c);
+    const undos = await rows('SELECT exit_code FROM tool_calls WHERE undo_of = ?', [id], c);
     const guard = undoGuard(call, undos);
     if (guard) throw conflict(guard);
     if (!isOnline(call.server_id)) throw agentOffline();
@@ -150,7 +131,7 @@ export async function undo(userId: number, id: number) {
       [call.consultation_id, call.recommendation_id, call.undo_command, id],
       c,
     );
-    return { serverId: call.server_id, undoId: insertId, command: call.undo_command! };
+    return { serverId: call.server_id, undoId: insertId, command: call.undo_command };
   });
   const grant = grantFor(serverId, command);
   if (!sendToAgent(serverId, { type: 'undo', toolCallId: undoId, command, ...(grant && { grant }) })) {

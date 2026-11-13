@@ -1,5 +1,6 @@
 import { addServer, Client, connectAgent, insertConsultation, insertToolCall, ORIGIN, resetDb, SERVER, signup, startApp } from './helpers.js';
 import assert from 'node:assert/strict';
+import { randomBytes, scryptSync } from 'node:crypto';
 import { after, before, beforeEach, mock, test } from 'node:test';
 import jwt from 'jsonwebtoken';
 import { one, pool, rows, tx } from '../src/db.js';
@@ -7,7 +8,7 @@ import { kstMonth, savingKrw } from '../src/fees.js';
 import { rollup, runRules } from '../src/jobs.js';
 import { track } from '../src/toolCalls.js';
 
-let app: Awaited<ReturnType<typeof startApp>>;
+let app;
 
 before(async () => {
   await resetDb();
@@ -20,14 +21,14 @@ after(async () => {
 });
 
 const HOUR = 3_600_000;
-const floorHour = (t: number) => Math.floor(t / HOUR) * HOUR;
+const floorHour = (t) => Math.floor(t / HOUR) * HOUR;
 
 test('sessions use UTC so NOW() matches the bound Dates', async () => {
-  const row = await one<{ skew: number }>('SELECT ABS(TIMESTAMPDIFF(SECOND, NOW(), ?)) AS skew', [new Date()]);
-  assert.ok(row!.skew <= 1);
+  const row = await one('SELECT ABS(TIMESTAMPDIFF(SECOND, NOW(), ?)) AS skew', [new Date()]);
+  assert.ok(row.skew <= 1);
   const [a, b] = await Promise.all([pool.getConnection(), pool.getConnection()]);
   for (const c of [a, b]) {
-    const [[zone]] = (await c.query("SELECT @@session.time_zone AS tz")) as any;
+    const [[zone]] = await c.query("SELECT @@session.time_zone AS tz");
     assert.equal(zone.tz, '+00:00');
     c.release();
   }
@@ -41,12 +42,12 @@ test('signup sets an HttpOnly Lax cookie and never returns the hash', async () =
   assert.equal(res.body.email, 'a@test.dev');
   assert.equal(res.body.name, '가나');
   assert.match(res.body.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-  const cookie = res.headers.get('set-cookie')!;
+  const cookie = res.headers.get('set-cookie');
   assert.match(cookie, /^gs_token=/);
   assert.match(cookie, /HttpOnly/);
   assert.match(cookie, /SameSite=Lax/);
-  const row = await one<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = ?', [res.body.id]);
-  assert.match(row!.password_hash, /^scrypt\$/);
+  const row = await one('SELECT password_hash FROM users WHERE id = ?', [res.body.id]);
+  assert.match(row.password_hash, /^\$2b\$10\$/);
 });
 
 test('signup validates input and rejects duplicates', async () => {
@@ -73,7 +74,7 @@ test('signup validates input and rejects duplicates', async () => {
 test('malformed JSON gets the error envelope', async () => {
   const res = await fetch(`${app.base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' });
   assert.equal(res.status, 400);
-  assert.equal(((await res.json()) as any).error.code, 'invalid_json');
+  assert.equal((await res.json()).error.code, 'invalid_json');
 });
 
 test('login, logout and session', async () => {
@@ -90,7 +91,26 @@ test('login, logout and session', async () => {
   assert.equal((await c.req('GET', '/api/me')).body.email, email);
   const out = await c.req('POST', '/api/auth/logout');
   assert.equal(out.status, 204);
-  assert.match(out.headers.get('set-cookie')!, /gs_token=;/);
+  assert.match(out.headers.get('set-cookie'), /gs_token=;/);
+});
+
+test('bcrypt hashes log in, and a legacy scrypt hash is rehashed on its first login', async () => {
+  const { email } = await signup(app.base);
+  assert.equal((await new Client(app.base).req('POST', '/api/auth/login', { email, password: 'password-123' })).status, 200);
+
+  // The format production stored before bcrypt.
+  const salt = randomBytes(16).toString('hex');
+  const legacy = `scrypt$${salt}$${scryptSync('old-password-1', salt, 32).toString('hex')}`;
+  await pool.query("INSERT INTO users (email, name, password_hash) VALUES ('legacy@test.dev', 'l', ?)", [legacy]);
+  const hashOf = async () => (await one('SELECT password_hash FROM users WHERE email = ?', ['legacy@test.dev'])).password_hash;
+  const c = new Client(app.base);
+  assert.equal((await c.req('POST', '/api/auth/login', { email: 'legacy@test.dev', password: 'wrong-password' })).status, 401);
+  assert.equal(await hashOf(), legacy);
+  assert.equal((await c.req('POST', '/api/auth/login', { email: 'legacy@test.dev', password: 'old-password-1' })).status, 200);
+  assert.match(await hashOf(), /^\$2b\$10\$/);
+  assert.equal((await c.req('GET', '/api/me')).body.email, 'legacy@test.dev');
+  const again = new Client(app.base);
+  assert.equal((await again.req('POST', '/api/auth/login', { email: 'legacy@test.dev', password: 'old-password-1' })).status, 200);
 });
 
 test('a foreign hash in password_hash fails login without crashing', async () => {
@@ -149,12 +169,12 @@ test('server creation reveals the token once and stores only its hash', async ()
   assert.equal(server.householdKwh, 300);
   assert.equal(server.lastSeenAt, null);
   assert.equal('agentToken' in server, false);
-  const row = await one<{ agent_token_hash: string }>('SELECT agent_token_hash FROM servers WHERE id = ?', [server.id]);
-  assert.match(row!.agent_token_hash, /^[0-9a-f]{64}$/);
-  assert.notEqual(row!.agent_token_hash, agentToken);
+  const row = await one('SELECT agent_token_hash FROM servers WHERE id = ?', [server.id]);
+  assert.match(row.agent_token_hash, /^[0-9a-f]{64}$/);
+  assert.notEqual(row.agent_token_hash, agentToken);
   const got = await client.req('GET', `/api/servers/${server.id}`);
   assert.equal('agentToken' in got.body, false);
-  assert.equal(JSON.stringify(got.body).includes(row!.agent_token_hash), false);
+  assert.equal(JSON.stringify(got.body).includes(row.agent_token_hash), false);
   assert.equal(got.body.online, false);
   assert.equal(got.body.latestWatts, null);
   assert.equal(got.body.isEstimated, null);
@@ -197,12 +217,12 @@ test("other users' resources are 404 on every :id route", async () => {
   const consultation = await insertConsultation(server.id);
   const call = await insertToolCall(consultation, { undo_command: 'u', exit_code: 0, decision: 'approved' });
   const pending = await insertToolCall(consultation, {});
-  const [rec] = (await pool.query(
+  const [rec] = await pool.query(
     "INSERT INTO recommendations (server_id, source, type, detail) VALUES (?, 'rule', 'idle', 'd')",
     [server.id],
-  )) as any;
+  );
 
-  const attempts: [string, string, unknown?][] = [
+  const attempts = [
     ['GET', `/api/servers/${server.id}`],
     ['PATCH', `/api/servers/${server.id}`, { name: 'x' }],
     ['DELETE', `/api/servers/${server.id}`],
@@ -226,7 +246,7 @@ test("other users' resources are 404 on every :id route", async () => {
   }
   assert.equal((await stranger.client.req('GET', '/api/servers')).body.length, 0);
   // Nothing moved.
-  const row = await one<{ decision: string }>('SELECT decision FROM tool_calls WHERE id = ?', [pending]);
+  const row = await one('SELECT decision FROM tool_calls WHERE id = ?', [pending]);
   assert.equal(row?.decision, 'pending');
   assert.equal((await owner.client.req('GET', `/api/servers/${server.id}`)).status, 200);
 });
@@ -245,11 +265,11 @@ test('metrics: oldest first, range validated', async () => {
   const { client } = await signup(app.base);
   const { server } = await addServer(client);
   const now = Math.floor(Date.now() / 1000) * 1000;
-  for (const [ageSec, watts] of [[100, 10], [50, 20]] as const) {
+  for (const [ageSec, watts] of [[100, 10], [50, 20]]) {
     await pool.query('INSERT INTO metrics VALUES (?, ?, 1, 2, ?, 0)', [server.id, new Date(now - ageSec * 1000), watts]);
   }
   const res = await client.req('GET', `/api/servers/${server.id}/metrics?range=1h`);
-  assert.deepEqual(res.body.map((m: any) => m.watts), [10, 20]);
+  assert.deepEqual(res.body.map((m) => m.watts), [10, 20]);
   assert.equal(res.body[0].isEstimated, false);
   assert.match(res.body[0].ts, /Z$/);
   assert.equal(res.body[0].ts, new Date(Math.floor((now - 100_000) / 10_000) * 10_000).toISOString());
@@ -267,7 +287,7 @@ test('processes: latest sample only, watts descending, top 10', async () => {
   }
   const { body } = await client.req('GET', `/api/servers/${server.id}/processes`);
   assert.equal(body.length, 10);
-  assert.deepEqual(body.map((p: any) => p.pid), [12, 11, 10, 9, 8, 7, 6, 5, 4, 3]);
+  assert.deepEqual(body.map((p) => p.pid), [12, 11, 10, 9, 8, 7, 6, 5, 4, 3]);
 });
 
 test('summary projects month-to-date from metrics and metrics_hourly without double counting', async () => {
@@ -307,13 +327,13 @@ test('rollup moves old metrics to hourly and leaves the rest', async () => {
 
   await rollup(now);
 
-  const hourly = await rows<{ hour: Date; avg_watts: number; kwh: number }>('SELECT * FROM metrics_hourly ORDER BY hour');
+  const hourly = await rows('SELECT * FROM metrics_hourly ORDER BY hour');
   assert.equal(hourly.length, 2);
-  assert.equal(hourly[0]!.hour.getTime(), eightDays);
-  assert.equal(hourly[0]!.avg_watts, 100);
-  assert.equal(hourly[0]!.kwh, 0.1); // 100 W for a full hour
-  assert.equal(hourly[1]!.avg_watts, 300);
-  const left = await rows<{ watts: number }>('SELECT watts FROM metrics ORDER BY ts');
+  assert.equal(hourly[0].hour.getTime(), eightDays);
+  assert.equal(hourly[0].avg_watts, 100);
+  assert.equal(hourly[0].kwh, 0.1); // 100 W for a full hour
+  assert.equal(hourly[1].avg_watts, 300);
+  const left = await rows('SELECT watts FROM metrics ORDER BY ts');
   assert.deepEqual(left.map((m) => m.watts), [70, 50]);
   assert.deepEqual(await rows('SELECT * FROM process_samples'), []);
 
@@ -336,7 +356,7 @@ test('a failed transaction leaves nothing behind', async () => {
   assert.ok(await one('SELECT id FROM servers WHERE id = ?', [server.id]));
 });
 
-function ruleSamples(serverId: number, now: number) {
+function ruleSamples(serverId, now) {
   const values = Array.from({ length: 24 }, (_, i) => [serverId, new Date(now - (i + 1) * HOUR), 1, 5, 60, 0]);
   return pool.query('INSERT INTO metrics VALUES ?', [values]);
 }
@@ -345,7 +365,7 @@ test('applying a rule recommendation records when and counts in the report', asy
   const { client } = await signup(app.base);
   const { server } = await addServer(client);
   const [inserted] = await pool.query("INSERT INTO recommendations (server_id, source, type, detail, est_saving_krw) VALUES (?, 'rule', 'idle', '끄기', 900)", [server.id]);
-  const id = (inserted as { insertId: number }).insertId;
+  const id = inserted.insertId;
 
   const applied = await client.req('POST', `/api/recommendations/${id}/apply`);
   assert.equal(applied.status, 200);
@@ -355,7 +375,7 @@ test('applying a rule recommendation records when and counts in the report', asy
   assert.equal((await client.req('POST', `/api/recommendations/${id}/dismiss`)).status, 409);
 
   const report = (await client.req('GET', '/api/reports/savings')).body;
-  assert.equal(report.bySource.find((s: { source: string }) => s.source === 'rule').applied, 1);
+  assert.equal(report.bySource.find((s) => s.source === 'rule').applied, 1);
 
   const undone = await client.req('POST', `/api/recommendations/${id}/unapply`);
   assert.equal(undone.status, 200);
@@ -363,21 +383,21 @@ test('applying a rule recommendation records when and counts in the report', asy
   assert.equal(undone.body.appliedAt, null);
   assert.equal((await client.req('POST', `/api/recommendations/${id}/unapply`)).status, 409);
   const after = (await client.req('GET', '/api/reports/savings')).body;
-  assert.equal(after.bySource.find((s: { source: string }) => s.source === 'rule').applied, 0);
+  assert.equal(after.bySource.find((s) => s.source === 'rule').applied, 0);
 });
 
 test('an applied recommendation with executed commands cannot be unapplied', async () => {
   const { client } = await signup(app.base);
   const { server } = await addServer(client);
   const [inserted] = await pool.query("INSERT INTO recommendations (server_id, source, type, detail, status, applied_at) VALUES (?, 'ai', 'idle', '끄기', 'applied', NOW())", [server.id]);
-  const id = (inserted as { insertId: number }).insertId;
+  const id = inserted.insertId;
   const consultationId = await insertConsultation(server.id);
   await pool.query("INSERT INTO tool_calls (consultation_id, recommendation_id, command, tier, decision, exit_code) VALUES (?, ?, 'x', 'approve', 'auto', 0)", [consultationId, id]);
 
   const res = await client.req('POST', `/api/recommendations/${id}/unapply`);
   assert.equal(res.status, 409);
   assert.equal(res.body.error.code, 'has_tool_calls');
-  assert.equal((await one<{ status: string }>('SELECT status FROM recommendations WHERE id = ?', [id]))!.status, 'applied');
+  assert.equal((await one('SELECT status FROM recommendations WHERE id = ?', [id])).status, 'applied');
 });
 
 test('rule job does not duplicate open recommendations and respects dismissal', async () => {
@@ -411,7 +431,7 @@ test('tool-call decision state machine over HTTP', async () => {
   const { client } = await signup(app.base);
   const { server, agentToken } = await addServer(client);
   const consultation = await insertConsultation(server.id);
-  const decide = (id: number, decision: unknown) => client.req('POST', `/api/tool-calls/${id}/decision`, { decision });
+  const decide = (id, decision) => client.req('POST', `/api/tool-calls/${id}/decision`, { decision });
 
   assert.equal((await decide(1, 'maybe')).status, 400);
 
@@ -423,7 +443,7 @@ test('tool-call decision state machine over HTTP', async () => {
   const res = await decide(deny, 'approved');
   assert.equal(res.status, 409);
   assert.equal(res.body.error.code, 'tier_denied');
-  const row = await one<{ decision: string; approved_at: Date | null }>('SELECT decision, approved_at FROM tool_calls WHERE id = ?', [deny]);
+  const row = await one('SELECT decision, approved_at FROM tool_calls WHERE id = ?', [deny]);
   assert.deepEqual(row, { decision: 'pending', approved_at: null });
 
   for (const decision of ['auto', 'approved', 'denied', 'blocked']) {
@@ -436,7 +456,7 @@ test('tool-call decision state machine over HTTP', async () => {
   // Live path, then a second decision on the same call.
   const agent = await connectAgent(app.wsBase, agentToken);
   agent.send({ type: 'tool_call', consultationId: consultation, requestId: 'r1', command: 'c', tier: 'approve', decision: 'pending', undoCommand: null });
-  const live = await waitFor(() => one<{ id: number }>("SELECT id FROM tool_calls WHERE consultation_id = ? AND command = 'c'", [consultation]));
+  const live = await waitFor(() => one("SELECT id FROM tool_calls WHERE consultation_id = ? AND command = 'c'", [consultation]));
   const denied = await decide(live.id, 'denied');
   assert.equal(denied.status, 200);
   assert.equal(denied.body.decision, 'denied');
@@ -456,7 +476,7 @@ test('an undecided call expires to denied after 10 minutes, and late decisions a
   try {
     track({ serverId: server.id, userId: user.id, requestId: 'slow', toolCallId: id, consultationId: consultation }, true);
     mock.timers.tick(9 * 60_000);
-    assert.equal((await one<{ decision: string }>('SELECT decision FROM tool_calls WHERE id = ?', [id]))?.decision, 'pending');
+    assert.equal((await one('SELECT decision FROM tool_calls WHERE id = ?', [id]))?.decision, 'pending');
     mock.timers.tick(60_000);
   } finally {
     mock.timers.reset();
@@ -468,7 +488,7 @@ test('an undecided call expires to denied after 10 minutes, and late decisions a
   await agent.close();
 });
 
-async function waitFor<T>(find: () => Promise<T | undefined>): Promise<T> {
+async function waitFor(find) {
   for (let i = 0; i < 100; i++) {
     const found = await find();
     if (found) return found;
@@ -481,7 +501,7 @@ test('undo requires a recorded command, a success and a live agent', async () =>
   const { client } = await signup(app.base);
   const { server, agentToken } = await addServer(client);
   const consultation = await insertConsultation(server.id);
-  const undo = (id: number) => client.req('POST', `/api/tool-calls/${id}/undo`);
+  const undo = (id) => client.req('POST', `/api/tool-calls/${id}/undo`);
 
   const noCommand = await insertToolCall(consultation, { decision: 'approved', exit_code: 0 });
   assert.equal((await undo(noCommand)).body.error.code, 'not_undoable');
@@ -517,11 +537,11 @@ test('consultation is refused while the agent is offline', async () => {
   assert.deepEqual((await client.req('GET', path)).body, []);
 });
 
-async function appliedRecommendation(serverId: number, source: string, appliedAt: Date): Promise<number> {
-  const [result] = (await pool.query(
+async function appliedRecommendation(serverId, source, appliedAt) {
+  const [result] = await pool.query(
     "INSERT INTO recommendations (server_id, source, type, detail, status, applied_at) VALUES (?, ?, 'idle', 'd', 'applied', ?)",
     [serverId, source, appliedAt],
-  )) as any;
+  );
   return result.insertId;
 }
 
@@ -553,12 +573,12 @@ test('savings: before hours from metrics_hourly pair with after hours still in r
   assert.equal(item.afterWatts, 110);
   const month = kstMonth(new Date());
   assert.equal(item.savedKwhMonth, Math.round(((90 * month.hours) / 1000) * 100) / 100);
-  const plan = { ratePlan: 'home_tiered', hourlyKrw: null, householdKwh: 150 } as const;
+  const plan = { ratePlan: 'home_tiered', hourlyKrw: null, householdKwh: 150 };
   assert.equal(item.savedKrwMonth, Math.round(savingKrw(plan, 200, 90, month)));
   assert.equal(item.savedCo2KgMonth, Math.round(item.savedKwhMonth * 0.4594 * 100) / 100);
-  assert.equal(body.total.savedKrwMonth, body.items.reduce((s: number, i: any) => s + i.savedKrwMonth, 0));
+  assert.equal(body.total.savedKrwMonth, body.items.reduce((s, i) => s + i.savedKrwMonth, 0));
 
-  assert.deepEqual(body.bySource.toSorted((a: any, b: any) => a.source.localeCompare(b.source)), [
+  assert.deepEqual(body.bySource.toSorted((a, b) => a.source.localeCompare(b.source)), [
     { source: 'ai', total: 1, applied: 1, savedKrwMonth: item.savedKrwMonth, savedCo2KgMonth: item.savedCo2KgMonth },
     { source: 'rule', total: 1, applied: 0, savedKrwMonth: 0, savedCo2KgMonth: 0 },
   ]);
@@ -587,7 +607,7 @@ test('savings: a fresh action has no finished after-hour yet, but still counts a
   await pool.query('INSERT INTO metrics_hourly VALUES (?, ?, 50, 0.05)', [server.id, new Date(floorHour(applied.getTime()) - HOUR)]);
   const { body } = await client.req('GET', '/api/reports/savings');
   assert.deepEqual(body.items, []);
-  const ai = body.bySource.find((s: any) => s.source === 'ai');
+  const ai = body.bySource.find((s) => s.source === 'ai');
   assert.deepEqual(ai, { source: 'ai', total: 1, applied: 1, savedKrwMonth: 0, savedCo2KgMonth: 0 });
 });
 
@@ -598,7 +618,7 @@ test('savings report is scoped to the caller and validates serverId', async () =
   await appliedRecommendation(server.id, 'rule', new Date(Date.now() - 30 * HOUR));
   const { body } = await stranger.client.req('GET', '/api/reports/savings');
   assert.deepEqual(body.items, []);
-  assert.equal(body.bySource.reduce((n: number, s: any) => n + s.total, 0), 0);
+  assert.equal(body.bySource.reduce((n, s) => n + s.total, 0), 0);
   assert.equal(body.bySource.length, 2);
   assert.equal((await stranger.client.req('GET', '/api/reports/savings?serverId=abc')).status, 400);
 });
@@ -672,7 +692,7 @@ test('savings: two changes close together are each measured only across their ow
     await pool.query('INSERT INTO metrics_hourly VALUES (?, ?, ?, 0.1)', [server.id, new Date(h), watts]);
   }
   const { body } = await client.req('GET', `/api/reports/savings?serverId=${server.id}`);
-  const byId = new Map(body.items.map((i: any) => [i.recommendationId, [i.beforeWatts, i.afterWatts]]));
+  const byId = new Map(body.items.map((i) => [i.recommendationId, [i.beforeWatts, i.afterWatts]]));
   assert.deepEqual(byId.get(first), [200, 150]);
   assert.deepEqual(byId.get(second), [150, 100]);
 });

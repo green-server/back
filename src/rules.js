@@ -1,20 +1,17 @@
-// Pure recommendation rules over a metrics window. The job in jobs.ts supplies the data.
+// Pure recommendation rules over a metrics window. The job in jobs.js supplies the data.
 //
 // empty_game_server is intentionally absent: api.md's agent messages carry no player count, so
 // nothing supports it. Add it when `metrics` gains that field.
 
-export type HourStat = { hour: Date; cpuAvg: number; cpuMax: number; memMax: number; watts: number };
-export type ProcessPoint = { ts: Date; pid: number; name: string; cpuPct: number; watts: number };
-export type RuleInput = {
-  now: Date;
-  /** Hourly buckets, up to the last WINDOW_DAYS days. */
-  hours: HourStat[];
-  /** Raw samples, up to the last RUNAWAY_WINDOW_MIN minutes. */
-  processes: ProcessPoint[];
-  /** Monthly KRW saved by cutting this many watts. */
-  saving: (watts: number) => number;
-};
-export type Finding = { type: string; detail: string; estSavingKrw: number };
+/**
+ * @typedef {object} RuleInput
+ * @property {Date} now
+ * @property {{ hour: Date, cpuAvg: number, cpuMax: number, memMax: number, watts: number }[]} hours
+ *   Hourly buckets, up to the last WINDOW_DAYS days.
+ * @property {{ ts: Date, pid: number, name: string, cpuPct: number, watts: number }[]} processes
+ *   Raw samples, up to the last RUNAWAY_WINDOW_MIN minutes.
+ * @property {(watts: number) => number} saving Monthly KRW saved by cutting this many watts.
+ */
 
 export const WINDOW_DAYS = 7;
 export const RUNAWAY_WINDOW_MIN = 30;
@@ -39,11 +36,11 @@ const RUNAWAY_CPU_PCT = 20;
 const RUNAWAY_MIN_SHARE = 0.9;
 const RUNAWAY_MIN_SPAN_MIN = 25;
 
-const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
-const won = (krw: number) => Math.max(0, Math.round(krw));
-const fmt = (n: number) => n.toFixed(1);
+const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+const won = (krw) => Math.max(0, Math.round(krw));
+const fmt = (n) => n.toFixed(1);
 
-function idle({ now, hours, saving }: RuleInput): Finding | null {
+function idle({ now, hours, saving }) {
   const recent = hours.filter((h) => h.hour.getTime() >= now.getTime() - 24 * 3_600_000);
   if (recent.length < IDLE_MIN_HOURS || recent.some((h) => h.cpuAvg >= IDLE_CPU_PCT)) return null;
   const watts = mean(recent.map((h) => h.watts));
@@ -54,7 +51,7 @@ function idle({ now, hours, saving }: RuleInput): Finding | null {
   };
 }
 
-function oversized({ hours, saving }: RuleInput): Finding | null {
+function oversized({ hours, saving }) {
   if (hours.length < OVERSIZED_MIN_HOURS) return null;
   const cpuPeak = Math.max(...hours.map((h) => h.cpuMax));
   const memPeak = Math.max(...hours.map((h) => h.memMax));
@@ -67,8 +64,8 @@ function oversized({ hours, saving }: RuleInput): Finding | null {
   };
 }
 
-function nightStop({ hours, saving }: RuleInput): Finding | null {
-  const isNight = (h: HourStat) => {
+function nightStop({ hours, saving }) {
+  const isNight = (h) => {
     const kstHour = (h.hour.getUTCHours() + 9) % 24;
     return kstHour >= NIGHT_START_KST && kstHour < NIGHT_START_KST + NIGHT_HOURS;
   };
@@ -85,12 +82,12 @@ function nightStop({ hours, saving }: RuleInput): Finding | null {
   };
 }
 
-function runawayProcess({ processes, saving }: RuleInput): Finding | null {
+function runawayProcess({ processes, saving }) {
   const times = processes.map((p) => p.ts.getTime());
   if (times.length === 0) return null;
   if (Math.max(...times) - Math.min(...times) < RUNAWAY_MIN_SPAN_MIN * 60_000) return null;
 
-  const hotByProcess = new Map<string, ProcessPoint[]>();
+  const hotByProcess = new Map();
   for (const p of processes) {
     if (p.cpuPct < RUNAWAY_CPU_PCT) continue;
     const key = `${p.pid}:${p.name}`;
@@ -99,7 +96,7 @@ function runawayProcess({ processes, saving }: RuleInput): Finding | null {
   const sampleCount = new Set(times).size;
   const runaway = [...hotByProcess.values()]
     .filter((hot) => hot.length >= sampleCount * RUNAWAY_MIN_SHARE)
-    .map((hot) => ({ first: hot[0]!, watts: mean(hot.map((p) => p.watts)) }))
+    .map((hot) => ({ first: hot[0], watts: mean(hot.map((p) => p.watts)) }))
     .sort((a, b) => b.watts - a.watts)[0];
   if (!runaway) return null;
   return {
@@ -109,8 +106,9 @@ function runawayProcess({ processes, saving }: RuleInput): Finding | null {
   };
 }
 
-export function evaluateRules(input: RuleInput): Finding[] {
+/** @param {RuleInput} input */
+export function evaluateRules(input) {
   return [idle, oversized, nightStop, runawayProcess]
     .map((rule) => rule(input))
-    .filter((f): f is Finding => f !== null);
+    .filter((f) => f !== null);
 }

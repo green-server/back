@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { clientIp, isPublicIp, locate } from '../src/geo.js';
 
-const req = (headers: Record<string, string>, remoteAddress = '::ffff:172.18.0.5') =>
-  ({ headers, socket: { remoteAddress } }) as unknown as Parameters<typeof clientIp>[0];
+const req = (headers, remoteAddress = '::ffff:172.18.0.5') =>
+  ({ headers, socket: { remoteAddress } });
 
 test('clientIp prefers the proxy headers over the socket', () => {
   assert.equal(clientIp(req({ 'cf-connecting-ip': '203.0.113.7' })), '203.0.113.7');
@@ -19,8 +19,8 @@ test('private addresses are never looked up', async () => {
 });
 
 test('locate reads city, country and coordinates', async () => {
-  const fake = (async () => Response.json({ success: true, city: 'Seoul', country_code: 'KR', latitude: 37.56, longitude: 126.97 })) as typeof fetch;
+  const fake = async () => Response.json({ success: true, city: 'Seoul', country_code: 'KR', latitude: 37.56, longitude: 126.97 });
   assert.deepEqual(await locate('8.8.8.8', fake), { lat: 37.56, lon: 126.97, label: 'Seoul, KR' });
-  const failed = (async () => Response.json({ success: false })) as typeof fetch;
+  const failed = async () => Response.json({ success: false });
   assert.equal(await locate('8.8.8.8', failed), null);
 });

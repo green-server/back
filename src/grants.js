@@ -13,13 +13,13 @@ const privateKey = createPrivateKey({ key: Buffer.concat([PKCS8_ED25519_PREFIX, 
 export const grantPublicKey = createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
 
 /** Must match message() in server_app/internal/priv. */
-export function signGrant(serverId: number, command: string, expires: number, nonce: string) {
+export function signGrant(serverId, command, expires, nonce) {
   const message = `green-server-grant-v1\n${serverId}\n${expires}\n${nonce}\n${command}`;
   return { expires, nonce, signature: sign(null, Buffer.from(message), privateKey).toString('base64') };
 }
 
 /** Only an owner's decision reaches this. Commands outside `greenserver priv` need no grant. */
-export function grantFor(serverId: number, command: string) {
+export function grantFor(serverId, command) {
   if (!command.startsWith(PRIVILEGED_PREFIX)) return undefined;
   return signGrant(serverId, command, Math.floor(Date.now() / 1000) + GRANT_SECONDS, randomBytes(16).toString('hex'));
 }

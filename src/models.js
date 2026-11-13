@@ -1,5 +1,4 @@
 // Row shapes and their api.md JSON form.
-import type { UserRow } from './auth.js';
 import { one, rows } from './db.js';
 import { co2Kg, kstMonth, monthlyCostKrw, projectKwh } from './fees.js';
 
@@ -7,27 +6,11 @@ import { co2Kg, kstMonth, monthlyCostKrw, projectKwh } from './fees.js';
 export const METRIC_INTERVAL_SEC = 10;
 const RECENT_WATTS_HOURS = 24;
 
-export const iso = (d: Date | null) => (d ? d.toISOString() : null);
+export const iso = (d) => (d ? d.toISOString() : null);
 
-export const toUser = (u: UserRow) => ({ id: u.id, email: u.email, name: u.name, createdAt: iso(u.created_at) });
+export const toUser = (u) => ({ id: u.id, email: u.email, name: u.name, createdAt: iso(u.created_at) });
 
-export type ServerRow = {
-  id: number;
-  user_id: number;
-  name: string;
-  kind: 'baremetal' | 'home_pc' | 'cloud_vm';
-  power_source: 'measured' | 'estimated';
-  rate_plan: 'home_tiered' | 'cloud_hourly';
-  hourly_krw: number | null;
-  household_kwh: number;
-  last_seen_at: Date | null;
-  latitude: number | null;
-  longitude: number | null;
-  location: string | null;
-  created_at: Date;
-};
-
-export const toServer = (s: ServerRow) => ({
+export const toServer = (s) => ({
   id: s.id,
   name: s.name,
   kind: s.kind,
@@ -41,35 +24,24 @@ export const toServer = (s: ServerRow) => ({
   createdAt: iso(s.created_at),
 });
 
-export const toPlan = (s: Pick<ServerRow, 'rate_plan' | 'hourly_krw' | 'household_kwh'>) => ({
+export const toPlan = (s) => ({
   ratePlan: s.rate_plan,
   hourlyKrw: s.hourly_krw,
   householdKwh: s.household_kwh,
 });
-
-type SummaryRow = ServerRow & {
-  latest_watts: number | null;
-  latest_estimated: number | null;
-  sample_watts: number;
-  sample_hours: number;
-  hourly_kwh: number;
-  hourly_hours: number;
-  recent_watts: number | null;
-  week_watts: number | null;
-};
 
 /**
  * One statement, so the month-to-date sum cannot straddle a rollup commit.
  * A cloud instance is billed for the hours it reported this month plus the rest of the month,
  * so one created mid-month or stopped for a week is not charged for those hours.
  */
-export async function serverSummaries(userId: number, isOnline: (id: number) => boolean, serverId?: number) {
+export async function serverSummaries(userId, isOnline, serverId) {
   const now = new Date();
   const month = kstMonth(now);
   const recentSince = new Date(now.getTime() - RECENT_WATTS_HOURS * 3_600_000);
   // Raw metrics are kept for 7 days, so this is the whole raw table for the server.
   const weekSince = new Date(now.getTime() - 7 * 24 * 3_600_000);
-  const found = await rows<SummaryRow>(
+  const found = await rows(
     `SELECT s.*, l.watts AS latest_watts, l.is_estimated AS latest_estimated,
        mt.sample_watts, mt.sample_hours, hr.hourly_kwh, hr.hourly_hours, rc.recent_watts, wk.week_watts
      FROM servers s
@@ -107,20 +79,7 @@ export async function serverSummaries(userId: number, isOnline: (id: number) => 
   });
 }
 
-export type RecommendationRow = {
-  id: number;
-  server_id: number;
-  consultation_id: number | null;
-  source: 'rule' | 'ai';
-  type: string;
-  detail: string;
-  est_saving_krw: number;
-  status: 'open' | 'applied' | 'dismissed';
-  created_at: Date;
-  applied_at: Date | null;
-};
-
-export const toRecommendation = (r: RecommendationRow) => ({
+export const toRecommendation = (r) => ({
   id: r.id,
   serverId: r.server_id,
   consultationId: r.consultation_id,
@@ -133,20 +92,7 @@ export const toRecommendation = (r: RecommendationRow) => ({
   appliedAt: iso(r.applied_at),
 });
 
-export type ConsultationRow = {
-  id: number;
-  server_id: number;
-  requested_at: Date;
-  auth_mode: 'subscription' | 'api_key';
-  model: string;
-  status: 'requested' | 'running' | 'done' | 'failed';
-  summary: string | null;
-  server_level: 'good' | 'fair' | 'warning' | 'critical' | null;
-  feedback: string[] | null;
-  fixes: string[] | null;
-};
-
-export const toConsultation = (c: ConsultationRow) => ({
+export const toConsultation = (c) => ({
   id: c.id,
   serverId: c.server_id,
   requestedAt: iso(c.requested_at),
@@ -159,23 +105,10 @@ export const toConsultation = (c: ConsultationRow) => ({
   fixes: c.fixes ?? [],
 });
 
-export const getConsultation = async (id: number) =>
-  toConsultation((await one<ConsultationRow>('SELECT * FROM consultations WHERE id = ?', [id]))!);
+export const getConsultation = async (id) =>
+  toConsultation(await one('SELECT * FROM consultations WHERE id = ?', [id]));
 
-export type ToolCallRow = {
-  id: number;
-  consultation_id: number;
-  recommendation_id: number | null;
-  command: string;
-  tier: 'auto' | 'approve' | 'deny';
-  decision: 'auto' | 'pending' | 'approved' | 'denied' | 'blocked';
-  approved_at: Date | null;
-  exit_code: number | null;
-  undo_command: string | null;
-  undo_of: number | null;
-};
-
-export const toToolCall = (t: ToolCallRow) => ({
+export const toToolCall = (t) => ({
   id: t.id,
   consultationId: t.consultation_id,
   recommendationId: t.recommendation_id,
@@ -188,5 +121,5 @@ export const toToolCall = (t: ToolCallRow) => ({
   undoOf: t.undo_of,
 });
 
-export const getToolCall = async (id: number) =>
-  toToolCall((await one<ToolCallRow>('SELECT * FROM tool_calls WHERE id = ?', [id]))!);
+export const getToolCall = async (id) =>
+  toToolCall(await one('SELECT * FROM tool_calls WHERE id = ?', [id]));

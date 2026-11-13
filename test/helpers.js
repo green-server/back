@@ -1,24 +1,23 @@
 import './env.js';
 import assert from 'node:assert/strict';
-import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
 import { createServer } from '../src/app.js';
 import { one, pool } from '../src/db.js';
 
 export const ORIGIN = 'http://front.test';
-const sockets = new Set<WebSocket>();
+const sockets = new Set();
 export const SERVER = { name: 'home', kind: 'home_pc', ratePlan: 'home_tiered', householdKwh: 300 };
 
-export async function resetDb(): Promise<void> {
-  const row = await one<{ db: string }>('SELECT DATABASE() AS db');
+export async function resetDb() {
+  const row = await one('SELECT DATABASE() AS db');
   assert.equal(row?.db, 'green_server_test', 'tests may only run against green_server_test');
   await pool.query('DELETE FROM users');
 }
 
 export async function startApp() {
   const server = createServer();
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address() as AddressInfo;
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
   return {
     base: `http://127.0.0.1:${port}`,
     wsBase: `ws://127.0.0.1:${port}`,
@@ -31,13 +30,13 @@ export async function startApp() {
   };
 }
 
-export type Res = { status: number; body: any; headers: Headers };
-
 export class Client {
   cookie = '';
-  constructor(readonly base: string) {}
+  constructor(base) {
+    this.base = base;
+  }
 
-  async req(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<Res> {
+  async req(method, path, body, headers = {}) {
     const res = await fetch(this.base + path, {
       method,
       headers: {
@@ -48,7 +47,7 @@ export class Client {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const setCookie = res.headers.get('set-cookie');
-    if (setCookie) this.cookie = setCookie.split(';')[0]!;
+    if (setCookie) this.cookie = setCookie.split(';')[0];
     const text = await res.text();
     return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers };
   }
@@ -56,39 +55,40 @@ export class Client {
 
 let nextEmail = 0;
 
-export async function signup(base: string, email = `user${++nextEmail}@test.dev`) {
+export async function signup(base, email = `user${++nextEmail}@test.dev`) {
   const client = new Client(base);
   const res = await client.req('POST', '/api/auth/signup', { email, name: '사용자', password: 'password-123' });
   assert.equal(res.status, 201);
   return { client, user: res.body, email };
 }
 
-export async function addServer(client: Client, input: object = SERVER) {
+export async function addServer(client, input = SERVER) {
   const res = await client.req('POST', '/api/servers', input);
   assert.equal(res.status, 201);
-  return res.body as { server: any; agentToken: string };
+  return res.body;
 }
 
 /** A WebSocket client that keeps what it receives, so a test can wait for one message by shape. */
 export class Peer {
-  private inbox: any[] = [];
-  private waiters: (() => void)[] = [];
+  inbox = [];
+  waiters = [];
 
-  constructor(readonly ws: WebSocket) {
+  constructor(ws) {
+    this.ws = ws;
     ws.on('message', (data) => {
       this.inbox.push(JSON.parse(data.toString()));
       for (const wake of this.waiters.splice(0)) wake();
     });
   }
 
-  async next(match: (m: any) => boolean, timeoutMs = 3000): Promise<any> {
+  async next(match, timeoutMs = 3000) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const i = this.inbox.findIndex(match);
       if (i >= 0) return this.inbox.splice(i, 1)[0];
       const left = deadline - Date.now();
       if (left <= 0) assert.fail(`no matching message; inbox: ${JSON.stringify(this.inbox)}`);
-      await new Promise<void>((resolve) => {
+      await new Promise((resolve) => {
         const timer = setTimeout(resolve, left);
         this.waiters.push(() => {
           clearTimeout(timer);
@@ -98,11 +98,11 @@ export class Peer {
     }
   }
 
-  send(message: object): void {
+  send(message) {
     this.ws.send(JSON.stringify(message));
   }
 
-  async close(): Promise<void> {
+  async close() {
     if (this.ws.readyState === WebSocket.CLOSED) return;
     await new Promise((resolve) => {
       this.ws.once('close', resolve);
@@ -111,7 +111,7 @@ export class Peer {
   }
 }
 
-export function connect(url: string, headers: Record<string, string>): Promise<Peer> {
+export function connect(url, headers) {
   const ws = new WebSocket(url, { headers });
   sockets.add(ws);
   const peer = new Peer(ws);
@@ -122,13 +122,13 @@ export function connect(url: string, headers: Record<string, string>): Promise<P
   });
 }
 
-export const connectAgent = (wsBase: string, token: string) =>
+export const connectAgent = (wsBase, token) =>
   connect(`${wsBase}/ws/agent`, { authorization: `Bearer ${token}` });
 
-export const connectWeb = (wsBase: string, cookie: string) =>
+export const connectWeb = (wsBase, cookie) =>
   connect(`${wsBase}/ws/web`, { origin: ORIGIN, cookie });
 
-export const metric = (overrides: object = {}) => ({
+export const metric = (overrides = {}) => ({
   type: 'metrics',
   ts: new Date().toISOString(),
   cpuPct: 12.5,
@@ -142,7 +142,7 @@ export const metric = (overrides: object = {}) => ({
   ...overrides,
 });
 
-export const toolCall = (consultationId: number, requestId: string, overrides: object = {}) => ({
+export const toolCall = (consultationId, requestId, overrides = {}) => ({
   type: 'tool_call',
   consultationId,
   requestId,
@@ -153,13 +153,13 @@ export const toolCall = (consultationId: number, requestId: string, overrides: o
   ...overrides,
 });
 
-export async function insertToolCall(consultationId: number, fields: Record<string, unknown>): Promise<number> {
+export async function insertToolCall(consultationId, fields) {
   const row = { consultation_id: consultationId, command: 'cmd', tier: 'approve', decision: 'pending', ...fields };
   const [result] = await pool.query('INSERT INTO tool_calls SET ?', [row]);
-  return (result as { insertId: number }).insertId;
+  return result.insertId;
 }
 
-export async function insertConsultation(serverId: number): Promise<number> {
+export async function insertConsultation(serverId) {
   const [result] = await pool.query("INSERT INTO consultations (server_id, auth_mode) VALUES (?, 'api_key')", [serverId]);
-  return (result as { insertId: number }).insertId;
+  return result.insertId;
 }

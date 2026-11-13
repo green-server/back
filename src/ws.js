@@ -1,7 +1,6 @@
-import { STATUS_CODES, type IncomingMessage, type Server } from 'node:http';
-import type { Duplex } from 'node:stream';
+import { STATUS_CODES } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { handleAgentMessage, type AgentContext } from './agent.js';
+import { handleAgentMessage } from './agent.js';
 import { sha256, userFromCookie } from './auth.js';
 import { config } from './config.js';
 import { one } from './db.js';
@@ -9,15 +8,15 @@ import { clientIp } from './geo.js';
 import { agents, broadcast, webClients } from './hub.js';
 
 const HEARTBEAT_MS = 30_000;
-const alive = new WeakSet<WebSocket>();
+const alive = new WeakSet();
 
-function watch(ws: WebSocket): void {
+function watch(ws) {
   alive.add(ws);
   ws.on('pong', () => alive.add(ws));
   ws.on('error', (err) => console.error('websocket error', err.message));
 }
 
-function acceptAgent(ws: WebSocket, ctx: AgentContext): void {
+function acceptAgent(ws, ctx) {
   const { serverId, userId } = ctx;
   const previous = agents.get(serverId);
   agents.set(serverId, ws);
@@ -37,7 +36,7 @@ function acceptAgent(ws: WebSocket, ctx: AgentContext): void {
   });
 }
 
-function acceptWeb(ws: WebSocket, userId: number): void {
+function acceptWeb(ws, userId) {
   const clients = webClients.get(userId) ?? new Set();
   webClients.set(userId, clients.add(ws));
   watch(ws);
@@ -47,20 +46,20 @@ function acceptWeb(ws: WebSocket, userId: number): void {
   });
 }
 
-function reject(socket: Duplex, status: number): void {
+function reject(socket, status) {
   socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
 }
 
-export function attachWebSockets(server: Server): void {
+export function attachWebSockets(server) {
   const agentWss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
   const webWss = new WebSocketServer({ noServer: true, maxPayload: 1024 });
 
-  async function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+  async function upgrade(req, socket, head) {
     const { pathname } = new URL(req.url ?? '/', 'http://localhost');
     if (pathname === '/ws/agent') {
       const token = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '')?.[1];
       const row = token
-        ? await one<{ id: number; user_id: number }>('SELECT id, user_id FROM servers WHERE agent_token_hash = ?', [sha256(token)])
+        ? await one('SELECT id, user_id FROM servers WHERE agent_token_hash = ?', [sha256(token)])
         : undefined;
       if (!row) return reject(socket, 401);
       agentWss.handleUpgrade(req, socket, head, (ws) => acceptAgent(ws, { serverId: row.id, userId: row.user_id, ip: clientIp(req) }));

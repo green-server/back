@@ -2,7 +2,7 @@
 
 Green Server의 백엔드. 웹에는 REST/WebSocket을 제공하고, 서버용 앱의 WebSocket 연결을 받는다.
 
-- 스택: Node.js + Express (TypeScript), MySQL 8
+- 스택: Node.js + Express (JavaScript ES modules, 빌드 단계 없음), MySQL 8
 - DB는 ORM 없이 `mysql2`로 SQL을 직접 작성한다.
 - `metrics`에 `(server_id, ts)` 인덱스를 두고, 원본은 7일 뒤 `metrics_hourly`로 요약한 다음 삭제한다.
 - 요금은 집 PC는 누진 구간, 클라우드는 시간당 요금 기준으로 원화 계산한다.

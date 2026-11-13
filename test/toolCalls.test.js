@@ -9,15 +9,15 @@ after(() => pool.end());
 test('decisions only leave pending', () => {
   assert.equal(decisionGuard({ tier: 'approve', decision: 'pending' }, 'approved'), null);
   assert.equal(decisionGuard({ tier: 'approve', decision: 'pending' }, 'denied'), null);
-  for (const decision of ['auto', 'approved', 'denied', 'blocked'] as const) {
-    for (const next of ['approved', 'denied'] as const) {
+  for (const decision of ['auto', 'approved', 'denied', 'blocked']) {
+    for (const next of ['approved', 'denied']) {
       assert.equal(decisionGuard({ tier: 'approve', decision }, next)?.code, 'not_pending');
     }
   }
 });
 
 test('deny tier can never be approved, even from pending', () => {
-  for (const decision of ['auto', 'pending', 'approved', 'denied', 'blocked'] as const) {
+  for (const decision of ['auto', 'pending', 'approved', 'denied', 'blocked']) {
     assert.equal(decisionGuard({ tier: 'deny', decision }, 'approved')?.code, 'tier_denied');
   }
 });
@@ -34,7 +34,7 @@ test('ingest records every pair outside the contract as blocked', () => {
 });
 
 test('undo needs a command and a success', () => {
-  const good = { decision: 'approved', exit_code: 0, undo_command: 'x', undo_of: null } as const;
+  const good = { decision: 'approved', exit_code: 0, undo_command: 'x', undo_of: null };
   assert.equal(undoGuard(good, []), null);
   assert.equal(undoGuard({ ...good, decision: 'auto' }, []), null);
   assert.equal(undoGuard({ ...good, undo_command: null }, [])?.code, 'not_undoable');
@@ -46,7 +46,7 @@ test('undo needs a command and a success', () => {
 });
 
 test('undo runs once, but a failed attempt may be retried', () => {
-  const good = { decision: 'approved', exit_code: 0, undo_command: 'x', undo_of: null } as const;
+  const good = { decision: 'approved', exit_code: 0, undo_command: 'x', undo_of: null };
   assert.equal(undoGuard(good, [{ exit_code: 0 }])?.code, 'already_undone');
   assert.equal(undoGuard(good, [{ exit_code: null }])?.code, 'already_undone');
   assert.equal(undoGuard(good, [{ exit_code: 1 }]), null);

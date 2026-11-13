@@ -5,7 +5,7 @@ import { after, before, beforeEach, test } from 'node:test';
 import { one, pool, rows } from '../src/db.js';
 import { settle } from '../src/toolCalls.js';
 
-let app: Awaited<ReturnType<typeof startApp>>;
+let app;
 
 before(async () => {
   await resetDb();
@@ -17,7 +17,7 @@ after(async () => {
   await pool.end();
 });
 
-const rejects = (promise: Promise<unknown>, status: number) => assert.rejects(promise, new Error(String(status)));
+const rejects = (promise, status) => assert.rejects(promise, new Error(String(status)));
 
 test('agent socket rejects missing and wrong tokens', async () => {
   await rejects(connect(`${app.wsBase}/ws/agent`, {}), 401);
@@ -54,7 +54,7 @@ test('agent happy path: metrics, consultation, approval, result, report, undo', 
   const event = await web.next((m) => m.type === 'metric');
   assert.equal(event.serverId, serverId);
   assert.deepEqual(event.metric, { ts: sample.ts, cpuPct: 12.5, memPct: 40, watts: 80, isEstimated: false });
-  assert.deepEqual(event.processes.map((p: { name: string }) => p.name), ['big', 'small'], 'heaviest first, as GET /processes');
+  assert.deepEqual(event.processes.map((p) => p.name), ['big', 'small'], 'heaviest first, as GET /processes');
 
   const summary = (await client.req('GET', `/api/servers/${serverId}`)).body;
   assert.equal(summary.latestWatts, 80);
@@ -62,7 +62,7 @@ test('agent happy path: metrics, consultation, approval, result, report, undo', 
   assert.ok(summary.lastSeenAt);
   assert.ok(summary.monthlyKwh > 0);
   const processes = (await client.req('GET', `/api/servers/${serverId}/processes`)).body;
-  assert.deepEqual(processes.map((p: any) => p.name), ['big', 'small']);
+  assert.deepEqual(processes.map((p) => p.name), ['big', 'small']);
 
   const started = await client.req('POST', `/api/servers/${serverId}/consultations`, { authMode: 'subscription' });
   assert.equal(started.status, 201);
@@ -125,7 +125,7 @@ test('agent happy path: metrics, consultation, approval, result, report, undo', 
   await web.next((m) => m.type === 'tool_call' && m.toolCall.id === pending.id && m.toolCall.recommendationId !== null);
 
   const recs = (await client.req('GET', `/api/servers/${serverId}/recommendations`)).body.toReversed();
-  assert.deepEqual(recs.map((r: any) => [r.source, r.type, r.status, r.estSavingKrw]), [
+  assert.deepEqual(recs.map((r) => [r.source, r.type, r.status, r.estSavingKrw]), [
     ['ai', 'idle', 'applied', 1200],
     ['ai', 'custom', 'open', 300],
   ]);
@@ -146,7 +146,7 @@ test('agent happy path: metrics, consultation, approval, result, report, undo', 
   assert.deepEqual(await agent.next((m) => m.type === 'undo'), { type: 'undo', toolCallId: undone.body.id, command: 'systemctl start minecraft' });
   agent.send({ type: 'undo_result', toolCallId: undone.body.id, exitCode: 0 });
   await web.next((m) => m.type === 'tool_call' && m.toolCall.id === undone.body.id && m.toolCall.exitCode === 0);
-  const reopened = (await client.req('GET', `/api/servers/${serverId}/recommendations`)).body.find((r: any) => r.id === recs[0].id);
+  const reopened = (await client.req('GET', `/api/servers/${serverId}/recommendations`)).body.find((r) => r.id === recs[0].id);
   assert.equal(reopened.status, 'open');
   assert.equal(reopened.appliedAt, null);
 
@@ -180,7 +180,7 @@ test('bad agent messages are ignored and the connection keeps working', async ()
   const good = metric({ watts: 42 });
   agent.send(good);
   assert.equal((await web.next((m) => m.type === 'metric')).metric.watts, 42);
-  const count = await one<{ n: number }>('SELECT COUNT(*) AS n FROM metrics WHERE server_id = ?', [server.id]);
+  const count = await one('SELECT COUNT(*) AS n FROM metrics WHERE server_id = ?', [server.id]);
   assert.equal(count?.n, 1);
   await agent.close();
   await web.close();
@@ -207,7 +207,7 @@ test('a malformed optional field does not cost the status or the audit record', 
   const done = await web.next((m) => m.type === 'consultation' && m.consultation.status === 'done');
   assert.equal(done.consultation.summary, null);
   const recs = (await client.req('GET', `/api/servers/${server.id}/recommendations`)).body;
-  assert.deepEqual(recs.map((r: any) => r.type), ['ok']);
+  assert.deepEqual(recs.map((r) => r.type), ['ok']);
   for (const peer of [agent, web]) await peer.close();
 });
 
@@ -225,23 +225,23 @@ test('an agent cannot reach another server', async () => {
   agent.send(metric()); // barrier: messages are handled in order
   await web.next((m) => m.type === 'metric');
 
-  const row = await one<{ status: string }>('SELECT status FROM consultations WHERE id = ?', [foreign]);
+  const row = await one('SELECT status FROM consultations WHERE id = ?', [foreign]);
   assert.equal(row?.status, 'requested');
   assert.equal(await one('SELECT id FROM tool_calls WHERE consultation_id = ?', [foreign]), undefined);
 
   // Undo rows are bound to their server too.
-  const [call] = (await pool.query(
+  const [call] = await pool.query(
     "INSERT INTO tool_calls (consultation_id, command, tier, decision, undo_of) VALUES (?, 'c', 'approve', 'approved', NULL)",
     [foreign],
-  )) as any;
-  const [undoRow] = (await pool.query(
+  );
+  const [undoRow] = await pool.query(
     "INSERT INTO tool_calls (consultation_id, command, tier, decision, undo_of) VALUES (?, 'u', 'approve', 'approved', ?)",
     [foreign, call.insertId],
-  )) as any;
+  );
   agent.send({ type: 'undo_result', toolCallId: undoRow.insertId, exitCode: 0 });
   agent.send(metric({ ts: new Date(Date.now() + 2000).toISOString() }));
   await web.next((m) => m.type === 'metric');
-  const undo = await one<{ exit_code: number | null }>('SELECT exit_code FROM tool_calls WHERE id = ?', [undoRow.insertId]);
+  const undo = await one('SELECT exit_code FROM tool_calls WHERE id = ?', [undoRow.insertId]);
   assert.equal(undo?.exit_code, null);
 
   for (const peer of [agent, otherAgent, web]) await peer.close();
@@ -278,7 +278,7 @@ test('deny tier is stored as blocked and cannot be approved', async () => {
   agent.send({ type: 'tool_result', requestId: 'evil', exitCode: 0 });
   agent.send(metric());
   await web.next((m) => m.type === 'metric');
-  const row = await one<{ decision: string; exit_code: number | null }>('SELECT decision, exit_code FROM tool_calls WHERE id = ?', [call.id]);
+  const row = await one('SELECT decision, exit_code FROM tool_calls WHERE id = ?', [call.id]);
   assert.deepEqual(row, { decision: 'blocked', exit_code: null });
   for (const peer of [agent, web]) await peer.close();
 });
@@ -298,18 +298,18 @@ test('a denied call ignores any later result, and terminal consultations stay te
   agent.send({ type: 'consultation_status', consultationId, status: 'done', summary: '끝', recommendations: [{ type: 'idle', detail: 'd', estSavingKrw: 1 }] });
   await web.next((m) => m.type === 'consultation' && m.consultation.status === 'done');
   // Nothing was applied, so the recommendation stays open.
-  const rec = await one<{ status: string }>('SELECT status FROM recommendations WHERE consultation_id = ?', [consultationId]);
+  const rec = await one('SELECT status FROM recommendations WHERE consultation_id = ?', [consultationId]);
   assert.equal(rec?.status, 'open');
-  const row = await one<{ exit_code: number | null }>('SELECT exit_code FROM tool_calls WHERE id = ?', [call.id]);
+  const row = await one('SELECT exit_code FROM tool_calls WHERE id = ?', [call.id]);
   assert.equal(row?.exit_code, null);
 
   agent.send({ type: 'consultation_status', consultationId, status: 'running', recommendations: [{ type: 'idle', detail: 'dup', estSavingKrw: 1 }] });
   agent.send({ type: 'consultation_status', consultationId, status: 'done', recommendations: [{ type: 'idle', detail: 'dup', estSavingKrw: 1 }] });
   agent.send(metric());
   await web.next((m) => m.type === 'metric');
-  const status = await one<{ status: string }>('SELECT status FROM consultations WHERE id = ?', [consultationId]);
+  const status = await one('SELECT status FROM consultations WHERE id = ?', [consultationId]);
   assert.equal(status?.status, 'done');
-  const count = await one<{ n: number }>('SELECT COUNT(*) AS n FROM recommendations WHERE consultation_id = ?', [consultationId]);
+  const count = await one('SELECT COUNT(*) AS n FROM recommendations WHERE consultation_id = ?', [consultationId]);
   assert.equal(count?.n, 1);
   for (const peer of [agent, web]) await peer.close();
 });
@@ -344,9 +344,9 @@ test('executing a recommendation applies it only when a change really succeeded'
   await agent.next((m) => m.type === 'consultation_start');
   const insert = async () => {
     const [r] = await pool.query("INSERT INTO recommendations (server_id, source, type, detail) VALUES (?, 'rule', 'idle', '서버를 끕니다.')", [server.id]);
-    return (r as { insertId: number }).insertId;
+    return r.insertId;
   };
-  const status = async (id: number) => (await one<{ status: string; applied_at: Date | null }>('SELECT status, applied_at FROM recommendations WHERE id = ?', [id]))!;
+  const status = async (id) => await one('SELECT status, applied_at FROM recommendations WHERE id = ?', [id]);
 
   // Nothing ran: the report may claim anything, the recommendation stays open.
   const untouched = await insert();
@@ -388,7 +388,7 @@ test('only an allowed privileged command is sent back signed', async () => {
   const command = 'greenserver priv docker restart minecraft-server';
   const undoCommand = 'greenserver priv docker start minecraft-server';
 
-  const ask = async (requestId: string) => {
+  const ask = async (requestId) => {
     agent.send(toolCall(consultationId, requestId, { command, undoCommand }));
     return (await web.next((m) => m.type === 'tool_call' && m.toolCall.decision === 'pending')).toolCall;
   };
@@ -456,7 +456,7 @@ test('a plan runs read-only, and its steps travel with the execution', async () 
   const { insertId } = (await pool.query(
     "INSERT INTO recommendations (server_id, source, type, detail, est_saving_krw) VALUES (?, 'rule', 'idle', '유휴 서비스', 10)",
     [server.id],
-  ))[0] as any;
+  ))[0];
 
   const planned = await client.req('POST', `/api/recommendations/${insertId}/plan`);
   assert.equal(planned.status, 201);
@@ -476,7 +476,7 @@ test('a plan runs read-only, and its steps travel with the execution', async () 
   assert.equal(run.readOnly, undefined);
   assert.equal(run.recommendationId, insertId);
   assert.match(run.task, /1\. bluetooth를 끕니다/);
-  assert.equal((await one<{ status: string }>('SELECT status FROM recommendations WHERE id = ?', [insertId]))!.status, 'open');
+  assert.equal((await one('SELECT status FROM recommendations WHERE id = ?', [insertId])).status, 'open');
   await agent.close();
 });
 
@@ -504,20 +504,20 @@ test('undoing one of two commands keeps the recommendation applied until both ar
   const { server, agentToken } = await addServer(client);
   const agent = await connectAgent(app.wsBase, agentToken);
   const [c] = await pool.query("INSERT INTO consultations (server_id, auth_mode, status) VALUES (?, 'api_key', 'done')", [server.id]);
-  const consultationId = (c as { insertId: number }).insertId;
+  const consultationId = c.insertId;
   const [r] = await pool.query(
     "INSERT INTO recommendations (server_id, source, type, detail, status, applied_at) VALUES (?, 'ai', 'idle', 'd', 'applied', NOW())",
     [server.id],
   );
-  const recId = (r as { insertId: number }).insertId;
-  const insert = async (command: string) => {
+  const recId = r.insertId;
+  const insert = async (command) => {
     const [t] = await pool.query('INSERT INTO tool_calls SET ?', [
       { consultation_id: consultationId, recommendation_id: recId, command, tier: 'approve', decision: 'approved', exit_code: 0, undo_command: `undo ${command}` },
     ]);
-    return (t as { insertId: number }).insertId;
+    return t.insertId;
   };
-  const status = async () => (await one<{ status: string }>('SELECT status FROM recommendations WHERE id = ?', [recId]))!.status;
-  const undoOne = async (id: number) => {
+  const status = async () => (await one('SELECT status FROM recommendations WHERE id = ?', [recId])).status;
+  const undoOne = async (id) => {
     const res = await client.req('POST', `/api/tool-calls/${id}/undo`);
     assert.equal(res.status, 202);
     await agent.next((m) => m.type === 'undo' && m.toolCallId === res.body.id);
