@@ -113,8 +113,10 @@ async function onToolResult(ctx, m) {
   const entry =
     settle(ctx.serverId, requestId) ??
     (await one(
+      // request_id is only unique per consultation: take the newest call on this server still waiting for a result.
       `SELECT t.id AS toolCallId FROM tool_calls t JOIN consultations c ON c.id = t.consultation_id
-       WHERE c.server_id = ? AND t.request_id = ?`,
+       WHERE c.server_id = ? AND t.request_id = ? AND t.exit_code IS NULL
+       ORDER BY t.id DESC LIMIT 1`,
       [ctx.serverId, requestId],
     ));
   if (!entry) return;
