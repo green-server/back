@@ -10,7 +10,7 @@ export const SERVER = { name: 'home', kind: 'home_pc', ratePlan: 'home_tiered', 
 
 export async function resetDb() {
   const row = await one('SELECT DATABASE() AS db');
-  assert.equal(row?.db, 'green_server_test', 'tests may only run against green_server_test');
+  assert.match(row?.db ?? '', /^green_server_test(_\w+)?$/, 'tests may only run against a green_server_test database');
   await pool.query('DELETE FROM users');
 }
 
