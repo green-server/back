@@ -602,6 +602,7 @@ test('recommendations: runRules creates an open row that the list returns', asyn
   await runRules(new Date(now));
   const stored = await rows('SELECT * FROM recommendations WHERE server_id = ?', [server.id]);
   assert.equal(stored.length, 1);
+  assert.match(stored[0].detail, /평균 60\.0W\(실측\)/);
   assert.equal(stored[0].status, 'open');
   assert.equal(stored[0].source, 'rule');
   const listed = (await client.req('GET', `/api/servers/${server.id}/recommendations`)).body;

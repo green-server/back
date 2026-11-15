@@ -10,7 +10,7 @@ function hours(count, stat) {
   return Array.from({ length: count }, (_, i) => {
     const hour = new Date(now.getTime() - (i + 1) * HOUR);
     const overrides = typeof stat === 'function' ? stat(hour) : stat;
-    return { hour, cpuAvg: 20, cpuMax: 60, memMax: 70, watts: 100, ...overrides };
+    return { hour, cpuAvg: 20, cpuMax: 60, memMax: 70, watts: 100, isEstimated: false, ...overrides };
   });
 }
 
@@ -27,7 +27,9 @@ test('idle fires on a quiet day and reports the saving', () => {
   const findings = run({ hours: hours(24, { cpuAvg: 2, watts: 50 }) });
   const idle = findings.find((f) => f.type === 'idle');
   assert.equal(idle?.estSavingKrw, 500);
-  assert.match(idle.detail, /50\.0W/);
+  assert.match(idle.detail, /평균 50\.0W\(실측\)/);
+  const estimated = hours(24, (h) => ({ cpuAvg: 2, watts: 50, isEstimated: h.getTime() === now.getTime() - 5 * HOUR }));
+  assert.match(run({ hours: estimated }).find((f) => f.type === 'idle').detail, /평균 50\.0W\(추정\)/);
 });
 
 test('idle needs enough hours and stays quiet on any busy hour', () => {
@@ -51,6 +53,9 @@ test('night_stop wants quiet KST nights and busy days', () => {
   };
   const findings = run({ hours: hours(96, pattern(1, 30)) });
   assert.equal(findings.find((f) => f.type === 'night_stop')?.estSavingKrw, 200); // 80 W * 6/24 * 10
+  assert.match(findings.find((f) => f.type === 'night_stop').detail, /평균 80\.0W\(실측\)/);
+  const estimatedNights = hours(96, (h) => ({ ...pattern(1, 30)(h), isEstimated: true }));
+  assert.match(run({ hours: estimatedNights }).find((f) => f.type === 'night_stop').detail, /평균 80\.0W\(추정\)/);
   assert.ok(!types({ hours: hours(96, pattern(30, 30)) }).includes('night_stop'));
   assert.ok(!types({ hours: hours(96, pattern(1, 1)) }).includes('night_stop'));
   assert.ok(!types({ hours: hours(6, pattern(1, 30)) }).includes('night_stop'));
@@ -70,6 +75,7 @@ test('runaway_process needs a sustained hog', () => {
   const findings = run({ processes: [...samples(30, 7, () => 95), ...samples(30, 8, () => 3)] });
   const runaway = findings.find((f) => f.type === 'runaway_process');
   assert.match(runaway.detail, /proc7/);
+  assert.match(runaway.detail, /평균 40\.0W\(추정\)/, 'a per-process share is apportioned, never measured');
   assert.equal(runaway?.estSavingKrw, 400);
   assert.ok(!types({ processes: samples(10, 7, () => 95) }).includes('runaway_process'), 'too short');
   assert.ok(!types({ processes: samples(30, 7, (i) => (i % 2 ? 95 : 5)) }).includes('runaway_process'), 'intermittent');

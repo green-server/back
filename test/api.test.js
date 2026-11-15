@@ -6,6 +6,7 @@ import jwt from 'jsonwebtoken';
 import { one, pool, rows, tx } from '../src/db.js';
 import { kstMonth, savingKrw } from '../src/fees.js';
 import { rollup, runRules } from '../src/jobs.js';
+import { loginLocked, recordLoginFailure } from '../src/routes.js';
 import { track } from '../src/toolCalls.js';
 
 let app;
@@ -31,6 +32,23 @@ test('sessions use UTC so NOW() matches the bound Dates', async () => {
     const [[zone]] = await c.query("SELECT @@session.time_zone AS tz");
     assert.equal(zone.tz, '+00:00');
     c.release();
+  }
+});
+
+test('health needs no session, and is 503 when the database query fails', async () => {
+  const anon = new Client(app.base);
+  const ok = await anon.req('GET', '/api/health');
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body, { ok: true });
+  const failing = mock.method(pool, 'query', async () => {
+    throw new Error('connection lost');
+  });
+  try {
+    const res = await anon.req('GET', '/api/health');
+    assert.equal(res.status, 503);
+    assert.deepEqual(res.body, { ok: false });
+  } finally {
+    failing.mock.restore();
   }
 });
 
@@ -303,7 +321,8 @@ test('summary projects month-to-date from metrics and metrics_hourly without dou
   const toDate = 5 + (100 * 30 * 10) / 3_600_000;
   const expected = toDate + (month.remainingHours * 100) / 1000;
   assert.ok(Math.abs(body.monthlyKwh - expected) < 0.05, `${body.monthlyKwh} vs ${expected}`);
-  assert.equal(body.monthlyCo2Kg, Math.round(body.monthlyKwh * 0.4594 * 100) / 100);
+  // CO2 comes from the unrounded kWh, so recomputing it from the rounded figure can be a cent off.
+  assert.ok(Math.abs(body.monthlyCo2Kg - body.monthlyKwh * 0.4594) < 0.01, `${body.monthlyCo2Kg} vs ${body.monthlyKwh}`);
   assert.equal(body.latestWatts, 100);
   assert.equal(body.weekWatts, 100);
   assert.equal(body.isEstimated, true);
@@ -571,6 +590,7 @@ test('savings: before hours from metrics_hourly pair with after hours still in r
   assert.equal(item.appliedAt, new Date(Math.round(applied.getTime() / 1000) * 1000).toISOString());
   assert.equal(item.beforeWatts, 200);
   assert.equal(item.afterWatts, 110);
+  assert.equal(item.isEstimated, false);
   const month = kstMonth(new Date());
   assert.equal(item.savedKwhMonth, Math.round(((90 * month.hours) / 1000) * 100) / 100);
   const plan = { ratePlan: 'home_tiered', hourlyKrw: null, householdKwh: 150 };
@@ -596,6 +616,7 @@ test('savings: a stopped server counts as 0 W, and on cloud saves its hourly fee
   const { body } = await client.req('GET', '/api/reports/savings');
   assert.equal(body.items.length, 1);
   assert.equal(body.items[0].afterWatts, 0);
+  assert.equal(body.items[0].isEstimated, true, 'rolled-up hours of a cloud_vm fall back to its estimated power_source');
   assert.equal(body.items[0].savedKrwMonth, 100 * kstMonth(new Date()).hours);
 });
 
@@ -672,6 +693,15 @@ test('an email is locked after repeated failed logins, and others are not', asyn
   assert.equal((await c.req('POST', '/api/auth/login', { email: bystander.email, password: 'password-123' })).status, 200);
 });
 
+test('a locked email stays locked when a flood of other emails fills the failure map', async () => {
+  const { email } = await signup(app.base);
+  for (let i = 0; i < 10; i++) recordLoginFailure(email);
+  for (let i = 0; i < 25_000; i++) recordLoginFailure(`junk${i}@flood.test`); // past the 10,000 cap
+  assert.equal(loginLocked(email), true);
+  const res = await new Client(app.base).req('POST', '/api/auth/login', { email, password: 'password-123' });
+  assert.equal(res.status, 429);
+});
+
 test('summary bills a cloud instance only for the hours it reported plus the rest of the month', async () => {
   const { client } = await signup(app.base);
   const { server } = await addServer(client, { name: 'vm', kind: 'cloud_vm', ratePlan: 'cloud_hourly', hourlyKrw: 100 });
@@ -695,4 +725,21 @@ test('savings: two changes close together are each measured only across their ow
   const byId = new Map(body.items.map((i) => [i.recommendationId, [i.beforeWatts, i.afterWatts]]));
   assert.deepEqual(byId.get(first), [200, 150]);
   assert.deepEqual(byId.get(second), [150, 100]);
+});
+
+test('savings: one estimated raw sample on either side marks the item estimated, whatever the server kind says', async () => {
+  const { client } = await signup(app.base);
+  const { server } = await addServer(client); // home_pc: power_source is measured
+  const t = floorHour(Date.now() - 30 * HOUR);
+  await appliedRecommendation(server.id, 'rule', new Date(t + 60_000));
+  for (let h = t - 23 * HOUR; h < t; h += HOUR) {
+    await pool.query('INSERT INTO metrics VALUES (?, ?, 1, 2, 200, 0)', [server.id, new Date(h)]);
+  }
+  for (let h = t + HOUR; h <= t + 24 * HOUR; h += HOUR) {
+    await pool.query('INSERT INTO metrics VALUES (?, ?, 1, 2, 100, 0)', [server.id, new Date(h)]);
+  }
+  const item = async () => (await client.req('GET', '/api/reports/savings')).body.items[0];
+  assert.equal((await item()).isEstimated, false);
+  await pool.query('INSERT INTO metrics VALUES (?, ?, 1, 2, 100, 1)', [server.id, new Date(t + 5 * HOUR + 1000)]);
+  assert.equal((await item()).isEstimated, true);
 });

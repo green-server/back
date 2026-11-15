@@ -24,11 +24,13 @@ export async function savingsReport(userId, serverId, now = new Date()) {
   // and sends them on reconnect, so a gap means the agent was not running.
   // A pair that spans another applied change on the same server belongs to neither: the drop
   // could be either one's, and crediting both would count it twice.
+  // metrics_hourly keeps no per-sample flag, so a rolled-up hour falls back to the server's power_source.
   const items = await rows(
     `WITH hourly AS (
-       SELECT server_id, hour, avg_watts FROM metrics_hourly WHERE server_id IN (${owned})
+       SELECT h.server_id, h.hour, h.avg_watts, s.power_source = 'estimated' AS is_estimated
+       FROM metrics_hourly h JOIN servers s ON s.id = h.server_id WHERE h.server_id IN (${owned})
        UNION ALL
-       SELECT server_id, CAST(DATE_FORMAT(ts, '%Y-%m-%d %H:00:00') AS DATETIME) AS hour, AVG(watts)
+       SELECT server_id, CAST(DATE_FORMAT(ts, '%Y-%m-%d %H:00:00') AS DATETIME) AS hour, AVG(watts), MAX(is_estimated)
        FROM metrics WHERE server_id IN (${owned}) GROUP BY server_id, hour
      ), applied AS (
        SELECT r.*, CAST(DATE_FORMAT(r.applied_at, '%Y-%m-%d %H:00:00') AS DATETIME) AS applied_hour
@@ -38,7 +40,8 @@ export async function savingsReport(userId, serverId, now = new Date()) {
             r.source, r.type, r.applied_at,
             AVG(b.avg_watts) AS before_watts,
             AVG(COALESCE(a.avg_watts, 0)) AS after_watts,
-            AVG(a.hour IS NULL) AS stopped_share
+            AVG(a.hour IS NULL) AS stopped_share,
+            MAX(b.is_estimated OR COALESCE(a.is_estimated, 0)) AS is_estimated
      FROM applied r
      JOIN servers s ON s.id = r.server_id
      JOIN hourly b ON b.server_id = r.server_id
@@ -68,6 +71,7 @@ export async function savingsReport(userId, serverId, now = new Date()) {
       savedKwhMonth: round2((savedWatts * month.hours) / 1000),
       savedCo2KgMonth: co2Kg((savedWatts * month.hours) / 1000),
       savedKrwMonth: Math.round(savedKrwMonth(toPlan(i), i.before_watts, i.after_watts, i.stopped_share, month)),
+      isEstimated: Boolean(i.is_estimated),
     };
   });
 

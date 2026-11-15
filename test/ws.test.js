@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createPublicKey, verify } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 import { one, pool, rows } from '../src/db.js';
-import { settle } from '../src/toolCalls.js';
+import { isTracked, settle } from '../src/toolCalls.js';
 
 let app;
 
@@ -311,6 +311,25 @@ test('a denied call ignores any later result, and terminal consultations stay te
   assert.equal(status?.status, 'done');
   const count = await one('SELECT COUNT(*) AS n FROM recommendations WHERE consultation_id = ?', [consultationId]);
   assert.equal(count?.n, 1);
+  for (const peer of [agent, web]) await peer.close();
+});
+
+test('a tool_call for a finished consultation is ignored: no row and no expiry timer', async () => {
+  const { client } = await signup(app.base);
+  const { server, agentToken } = await addServer(client);
+  const web = await connectWeb(app.wsBase, client.cookie);
+  const agent = await connectAgent(app.wsBase, agentToken);
+  for (const status of ['done', 'failed']) {
+    const { id } = (await client.req('POST', `/api/servers/${server.id}/consultations`, { authMode: 'api_key' })).body;
+    agent.send({ type: 'consultation_status', consultationId: id, status });
+    await web.next((m) => m.type === 'consultation' && m.consultation.status === status);
+    agent.send(toolCall(id, `late-${status}`));
+    agent.send(metric({ ts: new Date(Date.now() - (status === 'done' ? 0 : 1000)).toISOString() })); // barrier
+    await web.next((m) => m.type === 'metric');
+    assert.equal(await one('SELECT id FROM tool_calls WHERE consultation_id = ?', [id]), undefined);
+    assert.equal(isTracked(server.id, `late-${status}`), false);
+  }
+  assert.ok(!web.inbox.some((m) => m.type === 'tool_call'));
   for (const peer of [agent, web]) await peer.close();
 });
 

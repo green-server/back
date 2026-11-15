@@ -546,7 +546,7 @@ test('rule job: hourly stats are per server, and the NOT EXISTS guard is per ser
   const now = Date.now();
   const values = [];
   for (let i = 1; i <= 24; i++) {
-    for (const sid of [x.id, z.id, w.id]) values.push(m(sid, now - i * HOUR, 60, { cpu: 1, mem: 5 }));
+    for (const sid of [x.id, z.id, w.id]) values.push(m(sid, now - i * HOUR, 60, { cpu: 1, mem: 5, est: sid === w.id && i === 3 ? 1 : 0 }));
     values.push(m(y.id, now - i * HOUR, 60, { cpu: 50, mem: 5 }));
   }
   await insertMetrics(values);
@@ -555,10 +555,13 @@ test('rule job: hourly stats are per server, and the NOT EXISTS guard is per ser
 
   await runRules(new Date(now));
 
-  const idle = await rows("SELECT id, server_id, est_saving_krw FROM recommendations WHERE type = 'idle' ORDER BY server_id, id");
+  const idle = await rows("SELECT id, server_id, est_saving_krw, detail FROM recommendations WHERE type = 'idle' ORDER BY server_id, id");
   const est = Math.max(0, Math.round(savingKrw(HOME, 60, 60, kstMonth(new Date(now)))));
   assert.deepEqual(idle.map((r) => [r.server_id, r.est_saving_krw]), [[x.id, 1], [z.id, est], [w.id, est]]);
   assert.equal(idle[0].id, existing);
+  // One estimated sample in w's window makes its figure an estimate; z's own samples were all measured.
+  assert.match(idle[1].detail, /60\.0W\(실측\)/);
+  assert.match(idle[2].detail, /60\.0W\(추정\)/);
   assert.equal(Number((await one('SELECT COUNT(*) AS n FROM recommendations WHERE server_id = ?', [y.id])).n), 0);
 });
 

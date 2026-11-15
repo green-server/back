@@ -6,10 +6,11 @@
 /**
  * @typedef {object} RuleInput
  * @property {Date} now
- * @property {{ hour: Date, cpuAvg: number, cpuMax: number, memMax: number, watts: number }[]} hours
- *   Hourly buckets, up to the last WINDOW_DAYS days.
+ * @property {{ hour: Date, cpuAvg: number, cpuMax: number, memMax: number, watts: number, isEstimated: boolean }[]} hours
+ *   Hourly buckets, up to the last WINDOW_DAYS days. isEstimated: any sample in the hour was estimated.
  * @property {{ ts: Date, pid: number, name: string, cpuPct: number, watts: number }[]} processes
- *   Raw samples, up to the last RUNAWAY_WINDOW_MIN minutes.
+ *   Raw samples, up to the last RUNAWAY_WINDOW_MIN minutes. Their watts are always estimated: the
+ *   agent splits the machine's draw by CPU share, so even a measured total gives no measured share.
  * @property {(watts: number) => number} saving Monthly KRW saved by cutting this many watts.
  */
 
@@ -39,6 +40,8 @@ const RUNAWAY_MIN_SPAN_MIN = 25;
 const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
 const won = (krw) => Math.max(0, Math.round(krw));
 const fmt = (n) => n.toFixed(1);
+/** Every power figure says whether it was measured or estimated. */
+const power = (watts, estimated) => `${fmt(watts)}W(${estimated ? '추정' : '실측'})`;
 
 function idle({ now, hours, saving }) {
   const recent = hours.filter((h) => h.hour.getTime() >= now.getTime() - 24 * 3_600_000);
@@ -46,7 +49,7 @@ function idle({ now, hours, saving }) {
   const watts = mean(recent.map((h) => h.watts));
   return {
     type: 'idle',
-    detail: `최근 24시간 CPU 사용률이 시간 평균 ${IDLE_CPU_PCT}% 미만입니다. 평균 ${fmt(watts)}W를 쓰고 있어 서버를 꺼두면 절약할 수 있습니다.`,
+    detail: `최근 24시간 CPU 사용률이 시간 평균 ${IDLE_CPU_PCT}% 미만입니다. 평균 ${power(watts, recent.some((h) => h.isEstimated))}를 쓰고 있어 서버를 꺼두면 절약할 수 있습니다.`,
     estSavingKrw: won(saving(watts)),
   };
 }
@@ -77,7 +80,7 @@ function nightStop({ hours, saving }) {
   const watts = mean(night.map((h) => h.watts));
   return {
     type: 'night_stop',
-    detail: `새벽 시간대(${NIGHT_START_KST}시~${NIGHT_START_KST + NIGHT_HOURS}시) CPU 사용이 거의 없습니다. 이 시간에 평균 ${fmt(watts)}W를 쓰고 있어 야간 중지로 절약할 수 있습니다.`,
+    detail: `새벽 시간대(${NIGHT_START_KST}시~${NIGHT_START_KST + NIGHT_HOURS}시) CPU 사용이 거의 없습니다. 이 시간에 평균 ${power(watts, night.some((h) => h.isEstimated))}를 쓰고 있어 야간 중지로 절약할 수 있습니다.`,
     estSavingKrw: won(saving((watts * NIGHT_HOURS) / 24)),
   };
 }
@@ -101,7 +104,7 @@ function runawayProcess({ processes, saving }) {
   if (!runaway) return null;
   return {
     type: 'runaway_process',
-    detail: `프로세스 ${runaway.first.name}(PID ${runaway.first.pid})가 ${RUNAWAY_WINDOW_MIN}분 가까이 서버 전체 CPU의 ${RUNAWAY_CPU_PCT}% 이상을 쓰고 있습니다. 평균 ${fmt(runaway.watts)}W를 소비합니다.`,
+    detail: `프로세스 ${runaway.first.name}(PID ${runaway.first.pid})가 ${RUNAWAY_WINDOW_MIN}분 가까이 서버 전체 CPU의 ${RUNAWAY_CPU_PCT}% 이상을 쓰고 있습니다. 평균 ${power(runaway.watts, true)}를 소비합니다.`,
     estSavingKrw: won(saving(runaway.watts)),
   };
 }

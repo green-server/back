@@ -28,8 +28,9 @@ function clipText(v) {
   return v.slice(0, read);
 }
 
-const ownsConsultation = (ctx, id) =>
-  one('SELECT id FROM consultations WHERE id = ? AND server_id = ?', [id, ctx.serverId]);
+/** A finished consultation takes no more calls: nothing would ever settle or report them. */
+const liveConsultation = (ctx, id) =>
+  one("SELECT id FROM consultations WHERE id = ? AND server_id = ? AND status IN ('requested', 'running')", [id, ctx.serverId]);
 
 function isProcess(p) {
   return (
@@ -88,7 +89,7 @@ async function onToolCall(ctx, m) {
   if (!isId(consultationId) || !isText(requestId, 255) || !fitsText(command)) return;
   if (tier !== 'auto' && tier !== 'approve' && tier !== 'deny') return;
   if (decision !== 'auto' && decision !== 'pending' && decision !== 'blocked') return;
-  if (isTracked(ctx.serverId, requestId) || !(await ownsConsultation(ctx, consultationId))) return;
+  if (isTracked(ctx.serverId, requestId) || !(await liveConsultation(ctx, consultationId))) return;
 
   const stored = ingestDecision(tier, decision);
   // IGNORE: the agent re-sends queued records after a reconnect, and the unique key catches a repeat.
@@ -239,11 +240,7 @@ async function onConsultationStatus(ctx, m) {
 async function onConsultationStream(ctx, m) {
   const { consultationId, kind, text } = m;
   if (!isId(consultationId) || !STREAM_KINDS.includes(kind) || !isText(text, MAX_STREAM_TEXT)) return;
-  const live = await one(
-    "SELECT id FROM consultations WHERE id = ? AND server_id = ? AND status IN ('requested', 'running')",
-    [consultationId, ctx.serverId],
-  );
-  if (!live) return;
+  if (!(await liveConsultation(ctx, consultationId))) return;
   const entry = pushStream(consultationId, kind, text);
   broadcast(ctx.userId, { type: 'consultation_stream', consultationId, entry });
 }

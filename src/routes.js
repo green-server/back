@@ -26,7 +26,9 @@ const MODELS = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'cla
 const DEFAULT_MODEL = 'claude-sonnet-5-5';
 
 const MIN_PASSWORD = 8;
-const MAX_PASSWORD = 128; // bounds the scrypt work an unauthenticated request can demand
+// Caps what an unauthenticated login hashes. bcrypt reads only the first 72 bytes, so characters past
+// that (about 24 Hangul) add no strength; the cap also bounds the legacy scrypt check.
+const MAX_PASSWORD = 128;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const KINDS = ['baremetal', 'home_pc', 'cloud_vm'];
 const RATE_PLANS = ['home_tiered', 'cloud_hourly'];
@@ -39,17 +41,29 @@ const MAX_TRACKED_EMAILS = 10_000;
 
 // Failed logins per email, so one account cannot be guessed at. Keyed by email, not IP: behind the
 // proxy every request shares one address.
-// ponytail: in-process and cleared wholesale at the cap; a shared store if the backend scales out.
+// ponytail: in-process; a shared store if the backend scales out. At the cap the oldest entry that is
+// expired or not locked goes, so junk emails cannot push a locked one out. Only when every tracked
+// email is locked (MAX_TRACKED_EMAILS * MAX_LOGIN_FAILURES bcrypt failures per window) does the oldest go.
 const loginFailures = new Map();
 
-function loginLocked(email) {
+export function loginLocked(email) {
   const f = loginFailures.get(email);
   if (f && Date.now() - f.since > LOGIN_WINDOW_MS) loginFailures.delete(email);
   return (loginFailures.get(email)?.count ?? 0) >= MAX_LOGIN_FAILURES;
 }
 
-function recordLoginFailure(email) {
-  if (loginFailures.size >= MAX_TRACKED_EMAILS) loginFailures.clear();
+export function recordLoginFailure(email) {
+  if (loginFailures.size >= MAX_TRACKED_EMAILS && !loginFailures.has(email)) {
+    // Map order is insertion order, and an entry is only ever inserted when its window starts.
+    let victim = loginFailures.keys().next().value;
+    for (const [key, f] of loginFailures) {
+      if (f.count < MAX_LOGIN_FAILURES || Date.now() - f.since > LOGIN_WINDOW_MS) {
+        victim = key;
+        break;
+      }
+    }
+    loginFailures.delete(victim);
+  }
   const f = loginFailures.get(email) ?? { count: 0, since: Date.now() };
   loginFailures.set(email, { ...f, count: f.count + 1 });
 }
@@ -157,6 +171,16 @@ api.post('/auth/login', async (req, res) => {
 api.post('/auth/logout', (_req, res) => {
   clearSession(res);
   res.status(204).end();
+});
+
+// Public: the container healthcheck has no session. 503 tells it the database is unreachable.
+api.get('/health', async (_req, res) => {
+  try {
+    await one('SELECT 1');
+    res.json({ ok: true });
+  } catch {
+    res.status(503).json({ ok: false });
+  }
 });
 
 // Public on purpose: the root helper installer pins this key.

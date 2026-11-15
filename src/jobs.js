@@ -52,7 +52,8 @@ async function perServer(id, job) {
 
 async function findingsFor(server, now) {
   const hours = await rows(
-    `SELECT ${hourBucket} AS hour, AVG(cpu_pct) AS cpu_avg, MAX(cpu_pct) AS cpu_max, MAX(mem_pct) AS mem_max, AVG(watts) AS watts
+    `SELECT ${hourBucket} AS hour, AVG(cpu_pct) AS cpu_avg, MAX(cpu_pct) AS cpu_max, MAX(mem_pct) AS mem_max, AVG(watts) AS watts,
+            MAX(is_estimated) AS is_estimated
      FROM metrics WHERE server_id = ? AND ts >= ? GROUP BY hour ORDER BY hour`,
     [server.id, new Date(now.getTime() - WINDOW_DAYS * 24 * HOUR_MS)],
   );
@@ -60,7 +61,7 @@ async function findingsFor(server, now) {
     'SELECT ts, pid, name, cpu_pct, watts FROM process_samples WHERE server_id = ? AND ts >= ?',
     [server.id, new Date(now.getTime() - RUNAWAY_WINDOW_MIN * 60_000)],
   );
-  const stats = hours.map((h) => ({ hour: h.hour, cpuAvg: h.cpu_avg, cpuMax: h.cpu_max, memMax: h.mem_max, watts: h.watts }));
+  const stats = hours.map((h) => ({ hour: h.hour, cpuAvg: h.cpu_avg, cpuMax: h.cpu_max, memMax: h.mem_max, watts: h.watts, isEstimated: Boolean(h.is_estimated) }));
   const points = processes.map((p) => ({ ts: p.ts, pid: p.pid, name: p.name, cpuPct: p.cpu_pct, watts: p.watts }));
   const avgWatts = stats.reduce((sum, h) => sum + h.watts, 0) / (stats.length || 1);
   const month = kstMonth(now);
